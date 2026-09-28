@@ -342,7 +342,8 @@
           }
         ],
         "optional": []
-      }
+      },
+      "requiredByTemplate": true
     }
   },
   "scaffolding": {

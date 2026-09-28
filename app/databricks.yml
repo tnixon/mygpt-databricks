@@ -11,9 +11,25 @@ resources:
       # Start the app automatically on deploy.
       lifecycle:
         started: true
-      # Uncomment to enable on behalf of user API scopes. Available scopes: sql, dashboards.genie, files.files, serving.serving-endpoints
-      # user_api_scopes:
-      #   - sql
+
+      # Run serving calls on behalf of the signed-in user (OBO).
+      user_api_scopes:
+        - serving.serving-endpoints
+
+      # FMAPI foundation-model endpoints the app may query.
+      resources:
+        - name: serving-endpoint
+          serving_endpoint:
+            name: databricks-claude-sonnet-5
+            permission: CAN_QUERY
+        - name: serving-endpoint-llama
+          serving_endpoint:
+            name: databricks-llama-4-maverick
+            permission: CAN_QUERY
+        - name: serving-endpoint-gptoss
+          serving_endpoint:
+            name: databricks-gpt-oss-120b
+            permission: CAN_QUERY
 
 targets:
   default:
