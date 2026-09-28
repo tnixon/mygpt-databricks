@@ -1,0 +1,22 @@
+bundle:
+  name: st-jude-mygpt
+
+resources:
+  apps:
+    app:
+      name: "st-jude-mygpt"
+      description: "St. Jude MyGPT — governed research assistant (POC)"
+      source_code_path: ./
+
+      # Start the app automatically on deploy.
+      lifecycle:
+        started: true
+      # Uncomment to enable on behalf of user API scopes. Available scopes: sql, dashboards.genie, files.files, serving.serving-endpoints
+      # user_api_scopes:
+      #   - sql
+
+targets:
+  default:
+    default: true
+    workspace:
+      host: https://adb-7405616422000820.0.azuredatabricks.net

@@ -1,0 +1,106 @@
+@import "@databricks/appkit-ui/styles.css";
+
+/* ============================================================
+   St. Jude MyGPT theme
+   Palette + fonts lifted from St. Jude's own MyGPT frontend.
+   See ../../architecture/st-jude-design-tokens.md
+   ============================================================ */
+
+/* Brand display font — "Edge" (St. Jude) */
+@font-face {
+  font-family: 'Edge';
+  src: local('Edge-regular'), url('/fonts/EdgeDisplay-Regular.otf') format('opentype');
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Edge';
+  src: local('Edge-bold'), url('/fonts/EdgeDisplay-Bold.otf') format('opentype');
+  font-weight: 700;
+  font-display: swap;
+}
+
+/* St. Jude palette mapped onto AppKit semantic tokens — LIGHT */
+:root {
+  --background: #f5f7f8;
+  --foreground: #1b2a33;
+  --card: #ffffff;
+  --card-foreground: #1b2a33;
+  --popover: #ffffff;
+  --popover-foreground: #1b2a33;
+  --primary: #911938;               /* St. Jude crimson (brand) */
+  --primary-foreground: #ffffff;
+  --secondary: #e7ecef;
+  --secondary-foreground: #2a4759;
+  --muted: #eef1f3;
+  --muted-foreground: #687e8c;      /* panel1 slate */
+  --accent: #b4ced9;                /* panel3 */
+  --accent-foreground: #1b2a33;
+  --destructive: #b3261e;
+  --destructive-foreground: #ffffff;
+  --border: #d9dfe3;
+  --input: #d9dfe3;
+  --ring: #911938;
+  --sidebar: #2a4759;               /* nav slate (chrome) */
+  --sidebar-foreground: #e8edf0;
+  --sidebar-primary: #911938;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #34576b;
+  --sidebar-accent-foreground: #ffffff;
+  --sidebar-border: rgba(255, 255, 255, 0.10);
+  --sidebar-ring: #911938;
+}
+
+/* DARK — St. Jude teal ramp (panel*-dark). Applies via .dark class. */
+.dark {
+  --background: #01212b;            /* panel4-dark */
+  --foreground: #eaf0f2;
+  --card: #033f52;                  /* panel3-dark */
+  --card-foreground: #eaf0f2;
+  --popover: #033f52;
+  --popover-foreground: #eaf0f2;
+  --primary: #c21d46;               /* brighter crimson for dark contrast */
+  --primary-foreground: #ffffff;
+  --secondary: #0b3543;
+  --secondary-foreground: #eaf0f2;
+  --muted: #0b3543;
+  --muted-foreground: #9db2bc;
+  --accent: #0e3f50;
+  --accent-foreground: #eaf0f2;
+  --destructive: #e5484d;
+  --destructive-foreground: #ffffff;
+  --border: rgba(255, 255, 255, 0.10);
+  --input: rgba(255, 255, 255, 0.15);
+  --ring: #c21d46;
+  --sidebar: #011b23;
+  --sidebar-foreground: #c3c8cf;    /* nav-dark */
+  --sidebar-primary: #c21d46;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #0e3f50;
+  --sidebar-accent-foreground: #eaf0f2;
+  --sidebar-border: rgba(255, 255, 255, 0.10);
+  --sidebar-ring: #c21d46;
+}
+
+/* Mirror dark tokens for system preference (when no explicit .light/.dark class) */
+@media (prefers-color-scheme: dark) {
+  :root:not(.light):not(.dark) {
+    --background: #01212b; --foreground: #eaf0f2;
+    --card: #033f52; --card-foreground: #eaf0f2;
+    --popover: #033f52; --popover-foreground: #eaf0f2;
+    --primary: #c21d46; --primary-foreground: #ffffff;
+    --secondary: #0b3543; --secondary-foreground: #eaf0f2;
+    --muted: #0b3543; --muted-foreground: #9db2bc;
+    --accent: #0e3f50; --accent-foreground: #eaf0f2;
+    --destructive: #e5484d; --destructive-foreground: #ffffff;
+    --border: rgba(255, 255, 255, 0.10); --input: rgba(255, 255, 255, 0.15); --ring: #c21d46;
+    --sidebar: #011b23; --sidebar-foreground: #c3c8cf;
+    --sidebar-primary: #c21d46; --sidebar-primary-foreground: #ffffff;
+    --sidebar-accent: #0e3f50; --sidebar-accent-foreground: #eaf0f2;
+    --sidebar-border: rgba(255, 255, 255, 0.10); --sidebar-ring: #c21d46;
+  }
+}
+
+/* Body = St. Jude body stack; .font-edge = brand display font (headings) */
+body { font-family: 'Helvetica Neue', Helvetica, Arial, ui-sans-serif, system-ui, sans-serif; }
+.font-edge { font-family: 'Edge', 'Helvetica Neue', Helvetica, Arial, sans-serif; }
