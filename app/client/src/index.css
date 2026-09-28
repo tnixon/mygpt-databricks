@@ -104,3 +104,27 @@
 /* Body = St. Jude body stack; .font-edge = brand display font (headings) */
 body { font-family: 'Helvetica Neue', Helvetica, Arial, ui-sans-serif, system-ui, sans-serif; }
 .font-edge { font-family: 'Edge', 'Helvetica Neue', Helvetica, Arial, sans-serif; }
+
+/* Markdown answer rendering (assistant messages) */
+.md-body { font-size: 0.875rem; line-height: 1.6; }
+.md-body > :first-child { margin-top: 0; }
+.md-body > :last-child { margin-bottom: 0; }
+.md-body h1 { font-size: 1.15rem; font-weight: 700; margin: 0.75rem 0 0.4rem; }
+.md-body h2 { font-size: 1.05rem; font-weight: 700; margin: 0.7rem 0 0.35rem; }
+.md-body h3 { font-size: 1rem; font-weight: 600; margin: 0.6rem 0 0.3rem; }
+.md-body p { margin: 0.4rem 0; }
+.md-body ul { list-style: disc; padding-left: 1.25rem; margin: 0.4rem 0; }
+.md-body ol { list-style: decimal; padding-left: 1.25rem; margin: 0.4rem 0; }
+.md-body li { margin: 0.15rem 0; }
+.md-body li > ul, .md-body li > ol { margin: 0.15rem 0; }
+.md-body strong { font-weight: 700; }
+.md-body em { font-style: italic; }
+.md-body a { color: var(--primary); text-decoration: underline; text-underline-offset: 2px; }
+.md-body code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace; font-size: 0.8125em; background: color-mix(in srgb, var(--foreground) 8%, transparent); padding: 0.1em 0.35em; border-radius: 4px; }
+.md-body pre { background: color-mix(in srgb, var(--foreground) 8%, transparent); padding: 0.75rem; border-radius: 8px; overflow-x: auto; margin: 0.5rem 0; }
+.md-body pre code { background: transparent; padding: 0; }
+.md-body table { border-collapse: collapse; margin: 0.5rem 0; font-size: 0.8125rem; display: block; overflow-x: auto; }
+.md-body th, .md-body td { border: 1px solid var(--border); padding: 0.35rem 0.6rem; text-align: left; }
+.md-body th { background: color-mix(in srgb, var(--foreground) 5%, transparent); font-weight: 600; }
+.md-body blockquote { border-left: 3px solid var(--border); padding-left: 0.75rem; color: var(--muted-foreground); margin: 0.5rem 0; }
+.md-body hr { border: none; border-top: 1px solid var(--border); margin: 0.75rem 0; }

@@ -22,6 +22,7 @@ import {
   useServingStream,
 } from '@databricks/appkit-ui/react';
 import { Menu, Send } from 'lucide-react';
+import { Markdown } from './Markdown';
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
   `px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
@@ -264,10 +265,13 @@ function MessageBubble({ msg, streaming }: { msg: ChatMessage; streaming?: boole
             {streaming && <Spinner className="h-3 w-3" />}
           </div>
         )}
-        <div className="whitespace-pre-wrap break-words">
-          {msg.content}
-          {streaming && !msg.content && '…'}
-        </div>
+        {isUser ? (
+          <div className="whitespace-pre-wrap break-words">{msg.content}</div>
+        ) : msg.content ? (
+          <Markdown>{msg.content}</Markdown>
+        ) : (
+          streaming ? <span className="text-muted-foreground">…</span> : null
+        )}
       </div>
     </div>
   );
