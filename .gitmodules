@@ -1,0 +1,6 @@
+[submodule "reference/MyGPT"]
+	path = reference/MyGPT
+	url = https://github.com/stjude/MyGPT.git
+[submodule "reference/MyGPT-evaluations"]
+	path = reference/MyGPT-evaluations
+	url = https://github.com/stjude/MyGPT-evaluations.git
