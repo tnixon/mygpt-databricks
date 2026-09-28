@@ -8,6 +8,8 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
+  Switch,
+  Label,
   Badge,
   Alert,
   AlertTitle,
@@ -109,10 +111,26 @@ const MODELS = [
 
 type ModelAlias = (typeof MODELS)[number]['alias'];
 
+interface Source {
+  source_name: string;
+  page: number | null;
+  score: number;
+  snippet: string;
+}
+
 interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   model?: string;
+  sources?: Source[];
+  qrs?: number;
+}
+
+interface AskResponse {
+  answer: string;
+  sources: Source[];
+  qrs: number;
+  model: string;
 }
 
 // Pull the text delta out of an OpenAI-compatible streaming chunk.
@@ -129,7 +147,9 @@ function ChatPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [model, setModel] = useState<ModelAlias>(MODELS[0].alias);
-  const [queued, setQueued] = useState(false);
+  const [grounded, setGrounded] = useState(true);
+  const [queued, setQueued] = useState(false); // fires the direct (non-grounded) stream
+  const [asking, setAsking] = useState(false); // grounded request in flight
   const [user, setUser] = useState<string | null>(null);
 
   useEffect(() => {
@@ -139,11 +159,11 @@ function ChatPage() {
       .catch(() => setUser(null));
   }, []);
 
+  // Direct mode: stream straight from the model (no retrieval).
   const request = useMemo(
     () => ({ messages: messages.map((m) => ({ role: m.role, content: m.content })) }),
     [messages],
   );
-
   const { stream, chunks, streaming, error, reset } = useServingStream(request, {
     alias: model,
     onComplete: (finalChunks) => {
@@ -152,23 +172,50 @@ function ChatPage() {
       reset();
     },
   });
-
-  // Fire the stream once the queued user message is committed to state.
   useEffect(() => {
     if (queued) {
       stream();
       setQueued(false);
     }
   }, [queued, stream]);
-
   const streamingText = chunks.map(extractDelta).join('');
+
+  // Grounded mode: retrieve + cite via /api/ask.
+  const askGrounded = (question: string) => {
+    setAsking(true);
+    fetch('/api/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question, model }),
+    })
+      .then((r) => {
+        if (!r.ok) throw new Error('ask failed');
+        return r.json() as Promise<AskResponse>;
+      })
+      .then((d) => {
+        setMessages((prev) => [
+          ...prev,
+          { role: 'assistant', content: d.answer, model: d.model, sources: d.sources, qrs: d.qrs },
+        ]);
+      })
+      .catch(() => {
+        setMessages((prev) => [
+          ...prev,
+          { role: 'assistant', content: 'Something went wrong answering that. Please try again.', model },
+        ]);
+      })
+      .finally(() => setAsking(false));
+  };
+
+  const busy = streaming || asking;
 
   const send = () => {
     const text = input.trim();
-    if (!text || streaming) return;
+    if (!text || busy) return;
     setMessages((prev) => [...prev, { role: 'user', content: text }]);
     setInput('');
-    setQueued(true);
+    if (grounded) askGrounded(text);
+    else setQueued(true);
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -180,10 +227,10 @@ function ChatPage() {
 
   return (
     <div className="mx-auto flex h-full max-w-3xl flex-col gap-4">
-      {/* Toolbar: model selector · execution identity · trust note */}
+      {/* Toolbar: model · grounded toggle · identity · trust note */}
       <div className="flex flex-wrap items-center gap-3">
         <Select value={model} onValueChange={(v) => setModel(v as ModelAlias)}>
-          <SelectTrigger className="w-56">
+          <SelectTrigger className="w-52">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -194,20 +241,28 @@ function ChatPage() {
             ))}
           </SelectContent>
         </Select>
+        <div className="flex items-center gap-2">
+          <Switch id="grounded" checked={grounded} onCheckedChange={setGrounded} />
+          <Label htmlFor="grounded" className="text-sm">
+            Grounded
+          </Label>
+        </div>
         <Badge variant="secondary">{user ? `Running as ${user}` : 'Running as you (OBO)'}</Badge>
         <span className="ml-auto text-xs text-muted-foreground">
-          Responses are AI-generated — verify before use.
+          AI-generated — verify before use.
         </span>
       </div>
 
       {/* Conversation */}
       <ScrollArea className="flex-1 min-h-0 rounded-lg border bg-card">
         <div className="flex flex-col gap-4 p-4">
-          {messages.length === 0 && !streaming && (
+          {messages.length === 0 && !busy && (
             <div className="py-16 text-center">
               <h2 className="font-edge text-2xl font-bold text-foreground">Ask MyGPT</h2>
               <p className="mt-1 text-sm text-muted-foreground">
-                A governed research assistant for St. Jude. Ask a question to get started.
+                {grounded
+                  ? 'Grounded in St. Jude research documents — answers cite their sources.'
+                  : 'Direct model chat (no document retrieval).'}
               </p>
             </div>
           )}
@@ -215,10 +270,11 @@ function ChatPage() {
             <MessageBubble key={i} msg={m} />
           ))}
           {streaming && <MessageBubble msg={{ role: 'assistant', content: streamingText, model }} streaming />}
+          {asking && <MessageBubble msg={{ role: 'assistant', content: '', model }} streaming />}
         </div>
       </ScrollArea>
 
-      {error && (
+      {error && !grounded && (
         <Alert variant="destructive">
           <AlertTitle>Something went wrong</AlertTitle>
           <AlertDescription>{error}</AlertDescription>
@@ -231,13 +287,13 @@ function ChatPage() {
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={onKeyDown}
-          placeholder="Ask a research question…"
+          placeholder={grounded ? 'Ask about the research documents…' : 'Ask anything…'}
           rows={2}
           className="flex-1 resize-none"
-          disabled={streaming}
+          disabled={busy}
         />
-        <Button onClick={send} disabled={streaming || !input.trim()} className="h-auto py-3">
-          {streaming ? <Spinner className="h-4 w-4" /> : <Send className="h-4 w-4" />}
+        <Button onClick={send} disabled={busy || !input.trim()} className="h-auto py-3">
+          {busy ? <Spinner className="h-4 w-4" /> : <Send className="h-4 w-4" />}
           <span className="ml-2">Send</span>
         </Button>
       </div>
@@ -255,22 +311,48 @@ function MessageBubble({ msg, streaming }: { msg: ChatMessage; streaming?: boole
         }`}
       >
         {!isUser && (
-          <div className="mb-1 flex items-center gap-2 text-xs text-muted-foreground">
+          <div className="mb-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <span className="font-medium">MyGPT</span>
             {msg.model && (
               <Badge variant="outline" className="text-[10px]">
                 {modelLabel(msg.model)}
               </Badge>
             )}
+            {typeof msg.qrs === 'number' && (
+              <Badge variant="secondary" className="text-[10px]">
+                QRS {msg.qrs.toFixed(2)}
+              </Badge>
+            )}
             {streaming && <Spinner className="h-3 w-3" />}
           </div>
         )}
+
         {isUser ? (
           <div className="whitespace-pre-wrap break-words">{msg.content}</div>
         ) : msg.content ? (
           <Markdown>{msg.content}</Markdown>
         ) : (
           streaming ? <span className="text-muted-foreground">…</span> : null
+        )}
+
+        {!isUser && msg.sources && msg.sources.length > 0 && (
+          <div className="mt-3 border-t border-border pt-2">
+            <div className="mb-1 text-xs font-medium text-muted-foreground">Sources</div>
+            <ol className="space-y-1">
+              {msg.sources.map((s, i) => (
+                <li key={i} className="flex items-start gap-2 text-xs">
+                  <span className="text-muted-foreground">[{i + 1}]</span>
+                  <span className="flex-1 break-words">
+                    <span className="font-medium">{s.source_name}</span>
+                    {s.page != null ? ` · p${s.page}` : ''}
+                  </span>
+                  <Badge variant="outline" className="text-[10px]">
+                    {s.score.toFixed(2)}
+                  </Badge>
+                </li>
+              ))}
+            </ol>
+          </div>
         )}
       </div>
     </div>
