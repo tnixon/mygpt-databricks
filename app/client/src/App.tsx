@@ -247,7 +247,7 @@ function ChatPage() {
             Grounded
           </Label>
         </div>
-        <Badge variant="secondary">{user ? `${user} · OBO` : 'Service principal · dev'}</Badge>
+        <Badge variant="secondary">{user ? `Docs as ${user}` : 'Service principal · dev'}</Badge>
         <span className="ml-auto text-xs text-muted-foreground">
           AI-generated — verify before use.
         </span>

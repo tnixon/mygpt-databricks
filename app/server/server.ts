@@ -30,8 +30,6 @@ createApp({
     }),
   ],
   async onPluginsReady(appkit) {
-    const wc = createWorkspaceClient();
-
     appkit.server.extend((app) => {
       // Identity for the AI-trust badge.
       app.get('/api/whoami', (req, res) => {
@@ -54,6 +52,14 @@ createApp({
         const k = typeof body.k === 'number' && body.k > 0 && body.k <= 10 ? Math.floor(body.k) : 5;
 
         try {
+          // Retrieve AS THE SIGNED-IN USER (OBO) when deployed — Databricks Apps
+          // forwards their token in x-forwarded-access-token, so Unity Catalog
+          // enforces THEIR access to the governed index/documents (this is the
+          // access-control boundary). Locally (no forwarded token) fall back to
+          // the app service principal via the dev profile.
+          const userToken = req.header('x-forwarded-access-token');
+          const wc = userToken ? createWorkspaceClient({ token: userToken }) : createWorkspaceClient();
+
           // 1) Retrieve top-k chunks (hybrid ANN + BM25).
           const vsRaw: unknown = await wc.apiClient.request({
             path: `/api/2.0/vector-search/indexes/${VS_INDEX}/query`,
@@ -104,19 +110,14 @@ createApp({
             "do not contain the answer, say you couldn't find it in the documents.\n\n" +
             `Sources:\n${context}\n\nQuestion: ${question}`;
 
-          // 3) Generate. When deployed, run the model call on behalf of the
-          //    signed-in user (OBO) — Databricks Apps forwards their token in
-          //    x-forwarded-access-token — so usage is attributed per-user via the
-          //    Unity AI Gateway. In local dev that header is absent, so fall back
-          //    to the app's service principal (resolved from the dev profile).
-          //    Retrieval (above) stays on the service principal against the
-          //    shared, governed AI Search index.
-          const endpoint = appkit.serving(model);
-          const asUser = req.header('x-forwarded-access-token') != null;
-          const runner = asUser ? endpoint.asUser(req) : endpoint;
-          const genRaw: unknown = await runner.invoke({
-            messages: [{ role: 'user' as const, content: prompt }],
-          });
+          // 3) Generate as the app service principal — this is inference over the
+          //    chunks already authorized for the user in step 1; no customer-data
+          //    access happens in the model call itself. (If per-user model
+          //    chargeback via the AI Gateway becomes a requirement, switch this to
+          //    .asUser(req) as well.)
+          const genRaw: unknown = await appkit
+            .serving(model)
+            .invoke({ messages: [{ role: 'user' as const, content: prompt }] });
           const gen = genRaw as ChatResponse;
           const answer = gen.data?.choices?.[0]?.message?.content ?? '';
 
