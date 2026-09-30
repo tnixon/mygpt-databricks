@@ -104,12 +104,19 @@ createApp({
             "do not contain the answer, say you couldn't find it in the documents.\n\n" +
             `Sources:\n${context}\n\nQuestion: ${question}`;
 
-          // 3) Generate. Use the service-context invoke (no asUser): OBO needs a
-          //    forwarded user token, absent in local dev — this works locally via
-          //    the profile and as the app service principal when deployed.
-          const genRaw: unknown = await appkit
-            .serving(model)
-            .invoke({ messages: [{ role: 'user' as const, content: prompt }] });
+          // 3) Generate. When deployed, run the model call on behalf of the
+          //    signed-in user (OBO) — Databricks Apps forwards their token in
+          //    x-forwarded-access-token — so usage is attributed per-user via the
+          //    Unity AI Gateway. In local dev that header is absent, so fall back
+          //    to the app's service principal (resolved from the dev profile).
+          //    Retrieval (above) stays on the service principal against the
+          //    shared, governed AI Search index.
+          const endpoint = appkit.serving(model);
+          const asUser = req.header('x-forwarded-access-token') != null;
+          const runner = asUser ? endpoint.asUser(req) : endpoint;
+          const genRaw: unknown = await runner.invoke({
+            messages: [{ role: 'user' as const, content: prompt }],
+          });
           const gen = genRaw as ChatResponse;
           const answer = gen.data?.choices?.[0]?.message?.content ?? '';
 
