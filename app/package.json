@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "main": "dist/server.js",
   "type": "module",
+  "packageManager": "pnpm@11.0.8",
   "scripts": {
     "start": "NODE_ENV=production node --env-file-if-exists=./.env ./dist/server.js",
     "dev": "NODE_ENV=development tsx watch --tsconfig ./tsconfig.server.json --env-file-if-exists=./.env ./server/server.ts",
@@ -17,8 +18,8 @@
     "format:fix": "prettier --write .",
     "test": "vitest run",
     "clean": "rm -rf client/dist dist build node_modules",
-    "postinstall": "npm run typegen",
-    "prebuild": "npm run sync && npm run typegen -- --wait",
+    "postinstall": "test -f shared/appkit-types/serving.d.ts || npm run typegen",
+    "prebuild": "test -f shared/appkit-types/serving.d.ts || (npm run sync && npm run typegen -- --wait)",
     "predev": "npm run sync && npm run typegen",
     "sync": "appkit plugin sync --write --silent",
     "typegen": "appkit generate-types",
@@ -79,5 +80,12 @@
     "vite": "npm:rolldown-vite@7.1.14",
     "@opentelemetry/core": "2.8.0",
     "systeminformation": "5.31.7"
+  },
+  "pnpm": {
+    "overrides": {
+      "vite": "npm:rolldown-vite@7.1.14",
+      "@opentelemetry/core": "2.8.0",
+      "systeminformation": "5.31.7"
+    }
   }
 }

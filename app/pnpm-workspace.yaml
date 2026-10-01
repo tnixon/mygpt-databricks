@@ -1,0 +1,10 @@
+# Databricks Apps build compute installs deps with `pnpm install --frozen-lockfile`
+# (pnpm auto-selected via the `packageManager` field when a pnpm-lock.yaml is present).
+# pnpm 11 blocks dependency install scripts by default and FAILS the build with
+# ERR_PNPM_IGNORED_BUILDS. Explicitly allow the packages that need their postinstall
+# (esbuild fetches its native binary; appkit/protobufjs run setup steps).
+allowBuilds:
+  "@databricks/appkit": true
+  "@databricks/appkit-ui": true
+  esbuild: true
+  protobufjs: true
