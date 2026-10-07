@@ -34,12 +34,7 @@ resources:
     mygpt_etl:
       name: "[mygpt] ETL — parse, section-chunk, index config"
       tasks:
-        - task_key: sync_config
-          environment_key: default
-          spark_python_task:
-            python_file: etl/sync_config.py
         - task_key: landing
-          depends_on: [{ task_key: sync_config }]
           sql_task:
             warehouse_id: ${var.warehouse_id}
             file:
@@ -56,10 +51,6 @@ resources:
             warehouse_id: ${var.warehouse_id}
             file:
               path: etl/sql/03_sections_and_config.sql
-      environments:
-        - environment_key: default
-          spec:
-            client: "1"
 
     mygpt_deploy_embedding:
       name: "[mygpt] Deploy bge-m3 embedding endpoint"
@@ -68,7 +59,8 @@ resources:
           environment_key: default
           spark_python_task:
             python_file: agents/embedding/driver.py
-            parameters: ["--catalog", "${var.catalog}", "--schema", "${var.schema}"]
+            parameters:
+              ["--catalog", "${var.catalog}", "--schema", "${var.schema}", "--base-dir", "${workspace.file_path}"]
       environments:
         - environment_key: default
           spec:
@@ -76,6 +68,8 @@ resources:
             dependencies:
               - mlflow>=3.1.0
               - databricks-sdk>=0.40
+              - sentence-transformers>=3.0.0
+              - torch>=2.3
 
     mygpt_deploy_agent:
       name: "[mygpt] Deploy MyGPT RAG ResponsesAgent endpoint"
@@ -84,15 +78,21 @@ resources:
           environment_key: default
           spark_python_task:
             python_file: agents/rag_agent/driver.py
-            parameters: ["--catalog", "${var.catalog}", "--schema", "${var.schema}"]
+            parameters:
+              ["--catalog", "${var.catalog}", "--schema", "${var.schema}", "--base-dir", "${workspace.file_path}"]
       environments:
         - environment_key: default
           spec:
             client: "1"
+            # MLflow runs a full validation predict at log time (retrieve -> rerank ->
+            # generate -> score), so the job env needs the serving libs too.
             dependencies:
               - mlflow>=3.1.0
               - databricks-agents
               - databricks-sdk>=0.40
+              - sentence-transformers>=3.0.0
+              - torch>=2.3
+              - scikit-learn>=1.5
 
 targets:
   default:

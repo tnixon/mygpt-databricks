@@ -33,9 +33,9 @@ tagged AS (
     e:type::string                        AS elem_type,
     try_cast(e:bbox[0]:page_id AS INT)    AS page,
     trim(e:content::string)               AS content,
-    -- treat titles / section headers as section boundaries
+    -- treat ONLY titles / section headers as section boundaries (NOT page_header/
+    -- page_footer/page_number, which are running furniture that would pollute sections)
     CASE WHEN lower(e:type::string) IN ('title', 'section_header')
-           OR lower(e:type::string) LIKE '%header%'
          THEN trim(e:content::string) END AS header_text
   FROM elems
 ),
@@ -63,7 +63,7 @@ WITH body AS (
     regexp_extract(path, '([^/]+)$', 1) AS source_name
   FROM structural_biology.mygpt.doc_elements
   WHERE length(content) >= 80
-    AND lower(elem_type) NOT IN ('page_header', 'page_footer')
+    AND lower(elem_type) NOT IN ('page_header', 'page_footer', 'page_number')
 ),
 bucketed AS (
   SELECT

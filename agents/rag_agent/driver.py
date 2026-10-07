@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import shutil
 
 import mlflow
 from mlflow.models.resources import (
@@ -27,21 +26,16 @@ from mlflow.models.resources import (
     DatabricksVectorSearchIndex,
 )
 
-HERE = os.path.dirname(__file__)
-REF_RF_PKL = os.path.abspath(
-    os.path.join(HERE, "..", "..", "reference", "MyGPT", "backend", "data",
-                 "random_forest_models", "random_forest_hybrid_model_base.pkl")
-)
 
-
-def _stage_rf_artifact() -> str:
-    """Copy the RF pickle next to the agent so it ships as a code artifact."""
-    dest_dir = os.path.join(HERE, "artifacts")
-    os.makedirs(dest_dir, exist_ok=True)
-    dest = os.path.join(dest_dir, "random_forest_hybrid_model_base.pkl")
-    if not os.path.exists(dest) and os.path.exists(REF_RF_PKL):
-        shutil.copyfile(REF_RF_PKL, dest)
-    return dest
+def _package_dir(base_dir: str) -> str:
+    """Agent package dir. On a Databricks job `__file__` is undefined, so the job
+    passes --base-dir ${workspace.file_path}."""
+    if base_dir:
+        return os.path.join(base_dir, "agents", "rag_agent")
+    try:
+        return os.path.dirname(os.path.abspath(__file__))
+    except NameError:
+        return os.path.join(os.getcwd(), "agents", "rag_agent")
 
 
 def main() -> None:
@@ -52,13 +46,19 @@ def main() -> None:
     ap.add_argument("--endpoint-name", default="mygpt-rag-agent")
     ap.add_argument("--vs-endpoint", default="mygpt-vs")
     ap.add_argument("--embed-endpoint", default="mygpt-bge-m3")
+    ap.add_argument("--base-dir", default="")
     args = ap.parse_args()
 
+    here = _package_dir(args.base_dir)
     uc_model = f"{args.catalog}.{args.schema}.{args.model_name}"
     vs_index = f"{args.catalog}.{args.schema}.doc_chunks_index"
-    _stage_rf_artifact()
+    rf_pkl = os.path.join(here, "artifacts", "random_forest_hybrid_model_base.pkl")
 
     mlflow.set_registry_uri("databricks-uc")
+    # Serverless jobs have no default experiment — set one under the runner's home.
+    from databricks.sdk import WorkspaceClient
+
+    mlflow.set_experiment(f"/Users/{WorkspaceClient().current_user.me().user_name}/mygpt_phase1")
 
     # Resources the serving endpoint must reach (auth provisioned by Agent Framework).
     resources = [
@@ -70,16 +70,13 @@ def main() -> None:
     ]
 
     with mlflow.start_run():
+        # agent.py is self-contained (scoring/config/RF inlined) so no code_paths are
+        # needed — only the random-forest pickle ships as an artifact.
         logged = mlflow.pyfunc.log_model(
             name="agent",
-            python_model=os.path.join(HERE, "agent.py"),
-            code_paths=[
-                os.path.join(HERE, "scoring.py"),
-                os.path.join(HERE, "config.py"),
-                os.path.join(HERE, "hi_random_forest.py"),
-            ],
-            artifacts={"rf_model": os.path.join(HERE, "artifacts", "random_forest_hybrid_model_base.pkl")},
-            pip_requirements=os.path.join(HERE, "requirements.txt"),
+            python_model=os.path.join(here, "agent.py"),
+            artifacts={"rf_model": rf_pkl},
+            pip_requirements=os.path.join(here, "requirements.txt"),
             resources=resources,
         )
 
@@ -101,7 +98,7 @@ def main() -> None:
             "MYGPT_RF_MODEL_PATH": "/model/artifacts/rf_model/random_forest_hybrid_model_base.pkl",
             # Set MYGPT_WAREHOUSE_ID to read live config from Delta; omit for packaged defaults.
         },
-        scale_to_zero=True,
+        scale_to_zero_enabled=True,
     )
     print(f"Deploy requested for endpoint {args.endpoint_name}")
 
