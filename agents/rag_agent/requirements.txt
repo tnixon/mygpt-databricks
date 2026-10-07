@@ -1,0 +1,11 @@
+# Serving-image dependencies for the MyGPT ResponsesAgent (GPU small).
+# Pinned loosely for the POC; the driver logs the resolved versions into the
+# MLflow model so deploys are reproducible.
+mlflow>=3.1.0
+databricks-vectorsearch>=0.56
+databricks-sdk>=0.40
+sentence-transformers>=3.0.0
+transformers>=4.44
+torch>=2.3
+scikit-learn>=1.5          # must load random_forest_hybrid_model_base.pkl; bump if the pickle refuses to load
+numpy>=1.26,<2.0

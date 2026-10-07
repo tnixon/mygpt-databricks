@@ -1,0 +1,2 @@
+model_name,best_distance_q,worst_distance_q,best_distance_ac,worst_distance_ac,calibration_note
+bge-m3,0.10,0.80,0.10,0.80,BOOTSTRAP placeholders in cosine-DISTANCE space (distance = 1 - AI Search cosine similarity). Recalibrate from reference Q/A pairs in workstream C and tighten against the Phase-2 reference set. MyGPT's own bge-m3 numbers (81.44/820.82) are Ollama-L2 and do NOT transfer.

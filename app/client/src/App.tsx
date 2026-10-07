@@ -113,9 +113,13 @@ type ModelAlias = (typeof MODELS)[number]['alias'];
 
 interface Source {
   source_name: string;
+  section?: string;
   page: number | null;
-  score: number;
   snippet: string;
+  vector_score?: number | null;
+  bm25_score?: number | null;
+  rerank_score?: number | null;
+  nli?: string | null;
 }
 
 interface ChatMessage {
@@ -124,13 +128,24 @@ interface ChatMessage {
   model?: string;
   sources?: Source[];
   qrs?: number;
+  ars?: number | null;
+  hi_eq?: number | null;
+  hi_rf?: number | null;
 }
 
 interface AskResponse {
   answer: string;
   sources: Source[];
   qrs: number;
+  ars: number | null;
+  hi_eq: number | null;
+  hi_rf: number | null;
   model: string;
+}
+
+interface SectionOption {
+  section_title: string;
+  section_count: number;
 }
 
 // Pull the text delta out of an OpenAI-compatible streaming chunk.
@@ -151,12 +166,21 @@ function ChatPage() {
   const [queued, setQueued] = useState(false); // fires the direct (non-grounded) stream
   const [asking, setAsking] = useState(false); // grounded request in flight
   const [user, setUser] = useState<string | null>(null);
+  const [sections, setSections] = useState<SectionOption[]>([]);
+  const [focusSection, setFocusSection] = useState<string>('all');
 
   useEffect(() => {
     fetch('/api/whoami')
       .then((r) => r.json())
       .then((d: { user: string | null }) => setUser(d.user))
       .catch(() => setUser(null));
+  }, []);
+
+  useEffect(() => {
+    fetch('/api/sections')
+      .then((r) => r.json())
+      .then((d: { sections: SectionOption[] }) => setSections(d.sections ?? []))
+      .catch(() => setSections([]));
   }, []);
 
   // Direct mode: stream straight from the model (no retrieval).
@@ -186,7 +210,11 @@ function ChatPage() {
     fetch('/api/ask', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question, model }),
+      body: JSON.stringify({
+        question,
+        model,
+        focus: focusSection !== 'all' ? { section: focusSection } : undefined,
+      }),
     })
       .then((r) => {
         if (!r.ok) throw new Error('ask failed');
@@ -195,7 +223,16 @@ function ChatPage() {
       .then((d) => {
         setMessages((prev) => [
           ...prev,
-          { role: 'assistant', content: d.answer, model: d.model, sources: d.sources, qrs: d.qrs },
+          {
+            role: 'assistant',
+            content: d.answer,
+            model: d.model,
+            sources: d.sources,
+            qrs: d.qrs,
+            ars: d.ars,
+            hi_eq: d.hi_eq,
+            hi_rf: d.hi_rf,
+          },
         ]);
       })
       .catch(() => {
@@ -247,6 +284,21 @@ function ChatPage() {
             Grounded
           </Label>
         </div>
+        {grounded && sections.length > 0 && (
+          <Select value={focusSection} onValueChange={setFocusSection}>
+            <SelectTrigger className="w-52">
+              <SelectValue placeholder="All sections" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All sections</SelectItem>
+              {sections.map((s) => (
+                <SelectItem key={s.section_title} value={s.section_title}>
+                  {s.section_title} ({s.section_count})
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
         <Badge variant="secondary">{user ? `Docs as ${user}` : 'Service principal · dev'}</Badge>
         <span className="ml-auto text-xs text-muted-foreground">
           AI-generated — verify before use.
@@ -320,7 +372,22 @@ function MessageBubble({ msg, streaming }: { msg: ChatMessage; streaming?: boole
             )}
             {typeof msg.qrs === 'number' && (
               <Badge variant="secondary" className="text-[10px]">
-                QRS {msg.qrs.toFixed(2)}
+                QRS {Math.round(msg.qrs)}
+              </Badge>
+            )}
+            {typeof msg.ars === 'number' && (
+              <Badge variant="secondary" className="text-[10px]">
+                ARS {Math.round(msg.ars)}
+              </Badge>
+            )}
+            {typeof msg.hi_eq === 'number' && (
+              <Badge
+                variant={msg.hi_eq >= 50 ? 'destructive' : 'secondary'}
+                className="text-[10px]"
+                title={typeof msg.hi_rf === 'number' ? `Random-forest HI: ${Math.round(msg.hi_rf)}` : undefined}
+              >
+                HI {Math.round(msg.hi_eq)}
+                {typeof msg.hi_rf === 'number' ? ` · RF ${Math.round(msg.hi_rf)}` : ''}
               </Badge>
             )}
             {streaming && <Spinner className="h-3 w-3" />}
@@ -345,10 +412,22 @@ function MessageBubble({ msg, streaming }: { msg: ChatMessage; streaming?: boole
                   <span className="flex-1 break-words">
                     <span className="font-medium">{s.source_name}</span>
                     {s.page != null ? ` · p${s.page}` : ''}
+                    {s.section && s.section !== '(no section)' ? ` · ${s.section}` : ''}
                   </span>
-                  <Badge variant="outline" className="text-[10px]">
-                    {s.score.toFixed(2)}
-                  </Badge>
+                  {typeof s.rerank_score === 'number' && (
+                    <Badge variant="outline" className="text-[10px]" title="cross-encoder rerank score">
+                      ↕ {s.rerank_score.toFixed(2)}
+                    </Badge>
+                  )}
+                  {s.nli && (
+                    <Badge
+                      variant={s.nli === 'contradiction' ? 'destructive' : 'outline'}
+                      className="text-[10px]"
+                      title="answer↔source NLI entailment"
+                    >
+                      {s.nli}
+                    </Badge>
+                  )}
                 </li>
               ))}
             </ol>

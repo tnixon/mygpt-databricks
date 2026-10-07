@@ -1,25 +1,58 @@
 import { createApp, server, serving, createWorkspaceClient } from '@databricks/appkit';
 
-// Databricks AI Search (Vector Search) index over the governed doc chunks.
-const VS_INDEX = 'structural_biology.mygpt.doc_chunks_index';
-
-interface VsQueryResponse {
-  manifest?: { columns?: { name: string }[] };
-  result?: { data_array?: unknown[][] };
-}
-// Programmatic serving.invoke() wraps the completion in an ExecutionResult.
-interface ChatResponse {
-  ok?: boolean;
-  data?: { choices?: { message?: { content?: string } }[] };
-}
+// The MyGPT retrieval+scoring ResponsesAgent (its own Model Serving endpoint).
+const AGENT_ENDPOINT = process.env.MYGPT_AGENT_ENDPOINT ?? 'mygpt-rag-agent';
+// Optional SQL warehouse for the section catalogue (focus selector). If unset,
+// /api/sections returns an empty list and the UI simply omits the control.
+const WAREHOUSE_ID = process.env.MYGPT_WAREHOUSE_ID ?? '';
+const SCHEMA = process.env.MYGPT_SCHEMA ?? 'structural_biology.mygpt';
 
 const MODEL_ALIASES = ['sonnet', 'llama', 'gptoss'] as const;
 type ModelAlias = (typeof MODEL_ALIASES)[number];
 
+interface AgentSource {
+  source_name?: string;
+  section?: string;
+  page?: number | null;
+  snippet?: string;
+  vector_score?: number | null;
+  bm25_score?: number | null;
+  rerank_score?: number | null;
+  nli?: string | null;
+}
+interface AgentResponse {
+  output?: Array<{ content?: unknown; text?: string }>;
+  custom_outputs?: {
+    model?: string;
+    qrs?: number;
+    ars?: number;
+    hi_eq?: number;
+    hi_rf?: number | null;
+    sources?: AgentSource[];
+  };
+}
+
+// Pull the assistant text out of a ResponsesAgent output array (content may be a
+// plain string or responses-style content parts).
+function extractAnswer(resp: AgentResponse): string {
+  for (const item of resp.output ?? []) {
+    if (typeof item.text === 'string' && item.text) return item.text;
+    const content = item.content;
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) {
+      const text = content
+        .map((p) => (typeof p === 'object' && p && 'text' in p ? String((p as { text: unknown }).text ?? '') : ''))
+        .join('');
+      if (text) return text;
+    }
+  }
+  return '';
+}
+
 createApp({
   plugins: [
     server(),
-    // FMAPI foundation models via the serving plugin (runs OBO by default).
+    // FMAPI foundation models for DIRECT (non-grounded) chat streaming.
     serving({
       endpoints: {
         sonnet: { env: 'DATABRICKS_SERVING_ENDPOINT_NAME' },
@@ -37,10 +70,47 @@ createApp({
         res.json({ user });
       });
 
-      // Grounded RAG: retrieve from AI Search -> grounded prompt -> FMAPI answer.
-      // Returns the answer plus the cited sources and a retrieval-relevance (QRS) score.
+      // Section catalogue for the document/section focus selector (gap 13).
+      app.get('/api/sections', async (req, res) => {
+        if (!WAREHOUSE_ID) {
+          res.json({ sections: [] });
+          return;
+        }
+        try {
+          const userToken = req.header('x-forwarded-access-token');
+          const wc = userToken ? createWorkspaceClient({ token: userToken }) : createWorkspaceClient();
+          const out: unknown = await wc.apiClient.request({
+            path: '/api/2.0/sql/statements',
+            method: 'POST',
+            headers: new Headers({ 'Content-Type': 'application/json' }),
+            raw: false,
+            payload: {
+              warehouse_id: WAREHOUSE_ID,
+              statement: `SELECT section_title, section_count FROM ${SCHEMA}.paper_sections ORDER BY section_count DESC LIMIT 200`,
+              wait_timeout: '30s',
+            },
+          });
+          const rows = ((out as { result?: { data_array?: unknown[][] } }).result?.data_array ?? []).map((r) => ({
+            section_title: String(r[0] ?? ''),
+            section_count: Number(r[1] ?? 0),
+          }));
+          res.json({ sections: rows });
+        } catch (err) {
+          console.error('/api/sections failed', err);
+          res.json({ sections: [] });
+        }
+      });
+
+      // Grounded RAG: delegate to the ResponsesAgent, which owns retrieval, rerank,
+      // QRS/ARS/HI scoring, and generation. Retrieve AS THE SIGNED-IN USER (OBO) by
+      // forwarding their token so Unity Catalog + the agent enforce their access.
       app.post('/api/ask', async (req, res) => {
-        const body = (req.body ?? {}) as { question?: unknown; model?: unknown; k?: unknown };
+        const body = (req.body ?? {}) as {
+          question?: unknown;
+          model?: unknown;
+          k?: unknown;
+          focus?: { documents?: unknown; section?: unknown };
+        };
         const question = typeof body.question === 'string' ? body.question.trim() : '';
         if (!question) {
           res.status(400).json({ error: 'question is required' });
@@ -50,81 +120,36 @@ createApp({
           ? (body.model as ModelAlias)
           : 'sonnet';
         const k = typeof body.k === 'number' && body.k > 0 && body.k <= 10 ? Math.floor(body.k) : 5;
+        const focus = {
+          documents: Array.isArray(body.focus?.documents) ? body.focus?.documents.map(String) : [],
+          section: typeof body.focus?.section === 'string' ? body.focus?.section : undefined,
+        };
 
         try {
-          // Retrieve AS THE SIGNED-IN USER (OBO) when deployed — Databricks Apps
-          // forwards their token in x-forwarded-access-token, so Unity Catalog
-          // enforces THEIR access to the governed index/documents (this is the
-          // access-control boundary). Locally (no forwarded token) fall back to
-          // the app service principal via the dev profile.
           const userToken = req.header('x-forwarded-access-token');
           const wc = userToken ? createWorkspaceClient({ token: userToken }) : createWorkspaceClient();
 
-          // 1) Retrieve top-k chunks (hybrid ANN + BM25).
-          const vsRaw: unknown = await wc.apiClient.request({
-            path: `/api/2.0/vector-search/indexes/${VS_INDEX}/query`,
+          const raw: unknown = await wc.apiClient.request({
+            path: `/serving-endpoints/${AGENT_ENDPOINT}/invocations`,
             method: 'POST',
             headers: new Headers({ 'Content-Type': 'application/json' }),
             raw: false,
             payload: {
-              columns: ['source_name', 'page', 'chunk_text'],
-              query_text: question,
-              num_results: k,
-              query_type: 'HYBRID',
+              input: [{ role: 'user', content: question }],
+              custom_inputs: { dataset: 'mygpt', model, k, focus },
             },
           });
-          const vs = vsRaw as VsQueryResponse;
-          const cols = (vs.manifest?.columns ?? []).map((c) => c.name);
-          const rows = (vs.result?.data_array ?? []).map((r) => {
-            const o: Record<string, unknown> = {};
-            cols.forEach((c, i) => {
-              o[c] = r[i];
-            });
-            return o;
+          const resp = raw as AgentResponse;
+          const co = resp.custom_outputs ?? {};
+          res.json({
+            answer: extractAnswer(resp),
+            sources: co.sources ?? [],
+            qrs: co.qrs ?? 0,
+            ars: co.ars ?? null,
+            hi_eq: co.hi_eq ?? null,
+            hi_rf: co.hi_rf ?? null,
+            model: co.model ?? model,
           });
-          const sources = rows.map((r) => ({
-            source_name: String(r.source_name ?? ''),
-            page: r.page == null ? null : Number(r.page),
-            score: Number(r.score ?? 0),
-            snippet: String(r.chunk_text ?? '').slice(0, 240),
-          }));
-
-          if (sources.length === 0) {
-            res.json({
-              answer: "I couldn't find anything relevant in the indexed documents.",
-              sources: [],
-              qrs: 0,
-              model,
-            });
-            return;
-          }
-
-          // 2) Grounded prompt (single user turn — the serving request type only
-          //    allows user/assistant roles, so instructions go inline).
-          const context = rows
-            .map((r, i) => `[${i + 1}] ${r.source_name} (p${r.page ?? '?'}):\n${r.chunk_text}`)
-            .join('\n\n');
-          const prompt =
-            'You are MyGPT, a governed research assistant for St. Jude. Answer the question ' +
-            'using ONLY the numbered sources below, and cite them inline as [n]. If the sources ' +
-            "do not contain the answer, say you couldn't find it in the documents.\n\n" +
-            `Sources:\n${context}\n\nQuestion: ${question}`;
-
-          // 3) Generate as the app service principal — this is inference over the
-          //    chunks already authorized for the user in step 1; no customer-data
-          //    access happens in the model call itself. (If per-user model
-          //    chargeback via the AI Gateway becomes a requirement, switch this to
-          //    .asUser(req) as well.)
-          const genRaw: unknown = await appkit
-            .serving(model)
-            .invoke({ messages: [{ role: 'user' as const, content: prompt }] });
-          const gen = genRaw as ChatResponse;
-          const answer = gen.data?.choices?.[0]?.message?.content ?? '';
-
-          // 4) QRS = mean retrieval relevance across the cited sources.
-          const qrs = sources.reduce((a, s) => a + s.score, 0) / sources.length;
-
-          res.json({ answer, sources, qrs, model });
         } catch (err) {
           console.error('/api/ask failed', err);
           res.status(500).json({ error: 'ask failed' });

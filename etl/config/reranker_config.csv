@@ -1,0 +1,3 @@
+model_name,cutoff_score,language,note
+cross-encoder/qnli-electra-base,0.10,english,Query<->source relevance reranker (sigmoid-activated). Sources scoring below cutoff are dropped. MyGPT default for English.
+cross-encoder/nli-deberta-v3-base,0.00,english,Answer<->source NLI entailment model (labels: contradiction/entailment/neutral). cutoff_score unused; label feeds the hallucination-index RF features.

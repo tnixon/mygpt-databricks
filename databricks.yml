@@ -1,0 +1,101 @@
+# MyGPT platform bundle (DABs) — Phase 1 infrastructure as code.
+#
+# Deploys the ETL pipeline, the custom bge-m3 embedding endpoint, and the MyGPT
+# retrieval+scoring ResponsesAgent endpoint. The chat APP has its own bundle in
+# app/databricks.yml (bundle: st-jude-mygpt); this one owns the data/agent lane so
+# its job tasks can reference files under etl/ and agents/ (which live outside the
+# app bundle root). Everything here is deployed with `databricks bundle deploy`
+# (profile mygpt) — no hand-run CLI/notebook deploys.
+#
+#   databricks bundle validate -p mygpt
+#   databricks bundle deploy   -p mygpt
+#   databricks bundle run mygpt_etl -p mygpt            # build tables + config
+#   databricks bundle run mygpt_deploy_embedding -p mygpt
+#   databricks bundle run mygpt_deploy_agent -p mygpt
+#
+# NOTE: the Vector Search index (re)creation remains an API step (see the tail of
+# etl/sql/02_parse_chunk_index.sql) because it must point the Delta Sync index at
+# the mygpt-bge-m3 endpoint and sync the new `section` column.
+
+bundle:
+  name: st-jude-mygpt-platform
+
+variables:
+  warehouse_id:
+    description: SQL warehouse that runs the ETL SQL (serverless recommended).
+    default: ""
+  catalog:
+    default: structural_biology
+  schema:
+    default: mygpt
+
+resources:
+  jobs:
+    mygpt_etl:
+      name: "[mygpt] ETL — parse, section-chunk, index config"
+      tasks:
+        - task_key: landing
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file:
+              path: etl/sql/01_landing_documents.sql
+        - task_key: parse_chunk_index
+          depends_on: [{ task_key: landing }]
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file:
+              path: etl/sql/02_parse_chunk_index.sql
+        - task_key: sections_and_config
+          depends_on: [{ task_key: parse_chunk_index }]
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file:
+              path: etl/sql/03_sections_and_config.sql
+
+    mygpt_deploy_embedding:
+      name: "[mygpt] Deploy bge-m3 embedding endpoint"
+      tasks:
+        - task_key: deploy_embedding
+          environment_key: default
+          spark_python_task:
+            python_file: agents/embedding/driver.py
+            parameters:
+              ["--catalog", "${var.catalog}", "--schema", "${var.schema}", "--base-dir", "${workspace.file_path}"]
+      environments:
+        - environment_key: default
+          spec:
+            client: "1"
+            dependencies:
+              - mlflow>=3.1.0
+              - databricks-sdk>=0.40
+              - sentence-transformers>=3.0.0
+              - torch>=2.3
+
+    mygpt_deploy_agent:
+      name: "[mygpt] Deploy MyGPT RAG ResponsesAgent endpoint"
+      tasks:
+        - task_key: deploy_agent
+          environment_key: default
+          spark_python_task:
+            python_file: agents/rag_agent/driver.py
+            parameters:
+              ["--catalog", "${var.catalog}", "--schema", "${var.schema}", "--base-dir", "${workspace.file_path}"]
+      environments:
+        - environment_key: default
+          spec:
+            client: "1"
+            # MLflow runs a full validation predict at log time (retrieve -> rerank ->
+            # generate -> score), so the job env needs the serving libs too.
+            dependencies:
+              - mlflow>=3.1.0
+              - databricks-agents
+              - databricks-sdk>=0.40
+              - sentence-transformers>=3.0.0
+              - torch>=2.3
+              - scikit-learn>=1.5
+
+targets:
+  default:
+    default: true
+    workspace:
+      host: https://adb-7405616422000820.0.azuredatabricks.net

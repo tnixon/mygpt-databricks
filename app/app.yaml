@@ -1,8 +1,17 @@
 command: ['npm', 'run', 'start']
 env:
+  # FMAPI endpoints for DIRECT (non-grounded) chat streaming.
   - name: DATABRICKS_SERVING_ENDPOINT_NAME
     valueFrom: serving-endpoint
   - name: DATABRICKS_SERVING_ENDPOINT_LLAMA
     valueFrom: serving-endpoint-llama
   - name: DATABRICKS_SERVING_ENDPOINT_GPTOSS
     valueFrom: serving-endpoint-gptoss
+  # The MyGPT retrieval+scoring ResponsesAgent endpoint (grounded path).
+  - name: MYGPT_AGENT_ENDPOINT
+    valueFrom: agent-endpoint
+  - name: MYGPT_SCHEMA
+    value: 'structural_biology.mygpt'
+  # Optional: set to a SQL warehouse id to enable the /api/sections focus selector.
+  - name: MYGPT_WAREHOUSE_ID
+    value: ''

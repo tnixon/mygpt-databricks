@@ -1,0 +1,2 @@
+dataset_name,embedding_model,chunking_method,chunksize,overlap,use_bm25,use_reranker,reranker,documents_language,distance_function,coefficient_a_Qsem,coefficient_b_Qkey,coefficient_c_Qrank,coefficient_x_Asem,coefficient_y_Akey,coefficient_z_Arank,coefficient_p_QRS,coefficient_q_ARS,HI_by_equation
+mygpt,bge-m3,structure_preserving,1000,false,true,true,cross-encoder/qnli-electra-base,english,cosine,4,-4,-1,5,-2,0,1,2,true

@@ -16,7 +16,7 @@ resources:
       user_api_scopes:
         - serving.serving-endpoints
 
-      # FMAPI foundation-model endpoints the app may query.
+      # FMAPI foundation-model endpoints (direct chat) + the MyGPT agent endpoint.
       resources:
         - name: serving-endpoint
           serving_endpoint:
@@ -29,6 +29,10 @@ resources:
         - name: serving-endpoint-gptoss
           serving_endpoint:
             name: databricks-gpt-oss-120b
+            permission: CAN_QUERY
+        - name: agent-endpoint
+          serving_endpoint:
+            name: mygpt-rag-agent
             permission: CAN_QUERY
 
 targets:
