@@ -29,6 +29,24 @@ identity split, a basic chat UI with a simplified QRS, and a hand-run PDF-only E
 - **Depends on:** Phase 0.
 - **Closes gaps:** 1, 2, 3, 13 (retrieval side).
 
+**Settled design (detailed plan approved 2026-10-06):**
+- **Embedding model = `bge-m3`** on a custom Model Serving endpoint, used as the **managed** embedding of
+  the existing Delta Sync index — bge-m3 is prefix-free (so the Phase-0 `ai_parse_document` → Delta Sync
+  ingestion pattern is preserved) *and* is the multilingual model Phase 6 (SJ Global FR/ES) will need.
+- **Retrieval = a custom MLflow `ResponsesAgent`** on its own Model Serving endpoint (Mosaic AI Agent
+  Framework, MLflow tracing): embed → AI Search (ANN + hybrid, document/section focus filters) → cross-encoder
+  rerank (`qnli-electra-base`) → QRS → FMAPI generation → NLI (`nli-deberta-v3-base`) → ARS + Hallucination
+  Index; scores + sources returned via `custom_outputs`. Node `/api/ask` becomes a thin OBO-passthrough BFF.
+- **Per-dataset config** (coefficients, per-model distance cutoffs, reranker thresholds, sections) ports
+  MyGPT's Django tables to **Delta tables** in `structural_biology.mygpt`.
+- **Deployment = Databricks Asset Bundles (DABs)** for every component (embedding endpoint, agent endpoint,
+  ETL job(s), config/section tables, app) — no hand-run deploys.
+- **Fidelity = Balanced**, with higher-parity levers deferred until Phase-2 measurement shows a need:
+  (a) BM25 keyword term comes from AI Search **hybrid** (fused) rescored per-source rather than a separate
+  full-corpus `bm25s` index + content-dedup merge; (b) random-forest HI ships as a best-effort toggle rather
+  than a retrained first-class output; (c) bge-m3 managed embeddings chosen over nomic's self-managed
+  `search_document:`/`search_query:` prefix flow.
+
 ## Phase 2 — Evaluation harness (measurement-first)
 - **Goal:** make quality measurable before we scale — gate every later phase on it.
 - **Build:** `eval/` — MLflow 3 `genai.evaluate()` harness seeded from MyGPT-evaluations gold data; map QRS→RetrievalGroundedness, ARS→Correctness, HI→Guidelines + custom scorers (kinase extraction accuracy, structured-output validity); register datasets in UC.
