@@ -94,3 +94,45 @@ identity split, a basic chat UI with a simplified QRS, and a hand-run PDF-only E
 - **Databricks:** Databricks Apps (AppKit/AI DevKit); consumes the Phase 1–6 APIs.
 - **Depends on:** Phases 1–6 (all data, scores, history, agents, languages to surface).
 - **Closes gaps:** 6, 15; UI side of 9, 10, 13.
+
+---
+
+## Phase 1 — implementation notes (as-built, 2026-10-07)
+Phase 1 is **built, deployed, and validated end-to-end** in the FEVM sandbox (CLI profile `mygpt`,
+catalog `structural_biology.mygpt`). Everything is deployed via DABs (platform bundle at repo-root
+`databricks.yml`) + the app bundle (`app/databricks.yml`). Gaps 1, 2, 3, and 13 (retrieval side) are closed.
+
+### What is live
+| Component | Resource |
+|---|---|
+| Custom embeddings | `mygpt-bge-m3` Model Serving endpoint (BAAI/bge-m3, GPU small, **always-on**) |
+| Vector index | `structural_biology.mygpt.doc_chunks_index` — DELTA_SYNC, bge-m3 **managed** embeddings, 662 section-aware chunks, `section` synced |
+| Retrieval+scoring agent | `mygpt-rag-agent` Model Serving endpoint (MLflow `ResponsesAgent`, scale-to-zero) |
+| Config/section tables | `dataset_config`, `embedding_model_cutoffs`, `reranker_config`, `paper_sections` |
+| App | `st-jude-mygpt` (RUNNING) — thin OBO BFF → agent; ARS/HI badges + section focus |
+
+### Code map
+- `agents/rag_agent/agent.py` — **self-contained** `ResponsesAgent` (scoring + config + RF inlined; see below). Pipeline: retrieve (AI Search hybrid REST) → rerank (`qnli-electra-base`) → QRS → generate (FMAPI chat REST) → NLI (`nli-deberta-v3-base`) → ARS + HI. Scores/sources in `custom_outputs`.
+- `agents/rag_agent/scoring.py` (+ `test_scoring.py`, 10 passing golden tests) — the verified reference the agent's inlined math mirrors.
+- `agents/rag_agent/{config.py,hi_random_forest.py,requirements.txt,driver.py}`, `agents/rag_agent/artifacts/random_forest_hybrid_model_base.pkl`.
+- `agents/embedding/{driver.py,requirements.txt,smoke_test.py}`.
+- `etl/sql/02_parse_chunk_index.sql` (section-aware ~1000-char chunking, bge-m3 index), `etl/sql/03_sections_and_config.sql` (inline config seed), `etl/config/*.csv` (canonical editable copy).
+- `app/server/server.ts` (`/api/ask` → agent, `/api/sections`), `app/client/src/App.tsx` (QRS/ARS/HI badges, per-source rerank/NLI, section selector), `app/app.yaml`, `app/databricks.yml`.
+
+### Deviations discovered during deployment (and why)
+- **Agent is one self-contained file.** MLflow validates a code-based model by importing `agent.py` **in isolation** at log time, so sibling-module imports (`scoring`/`config`/`hi_random_forest`) and `code_paths` don't resolve. Fix: inline them into `agent.py`; keep `scoring.py` + tests as the reference.
+- **Agent talks to VS / FMAPI over REST** (`WorkspaceClient().api_client.do(...)`), not the `VectorSearchClient` or `get_open_ai_client()` SDK helpers. The injected serving credentials work reliably over REST; the SDK clients hit credential-discovery / `databricks-sdk[openai]` gaps inside Model Serving. Embeddings use the same REST invocations path.
+- **MLflow runs a full validation `predict` at log time.** The agent-deploy job env therefore needs the serving libs (`torch`, `sentence-transformers`, `scikit-learn`) and the live endpoints must be reachable; `_retrieve` also degrades to `[]` on error so the validation predict never hard-fails.
+- **bge-m3 must be always-on** (`scale_to_zero_enabled=false`): Vector Search embeds the **query** through it at query time, which errors if the endpoint is cold.
+- **Config seed is inlined** in `03_sections_and_config.sql` (serverless `spark_python_task` has no `__file__`, and the CSV-via-volume sync was brittle); `etl/config/*.csv` remains the editable source of truth. Driver scripts take `--base-dir ${workspace.file_path}` for the same `__file__` reason.
+- **App deploy** uses `databricks apps deploy <name> --source-code-path <workspace path>` (the app already existed from Phase 0 under a teammate's bundle, so `bundle deploy` 409s on create). The Apps platform builds the Node app on deploy (no `dist/` upload needed).
+
+### Validated
+Live query ("temozolomide dosing biomarkers") returned a grounded, cited answer with **QRS 56 / ARS 82 / HI 0**, 4 sources carrying vector + rerank scores, section labels, and NLI entailment tags. Section-focus filtering confirmed (exact-match `filters_json` on `section`). Scoring math covered by `test_scoring.py` (10/10).
+
+### Known limitations / follow-ups (not blocking)
+- **HI-RF returns `None`** — the pickled random forest won't load under the serving image's scikit-learn (version drift). Equation-HI is primary and works; retraining the RF on Databricks is the documented higher-parity step.
+- **Distance cutoffs are bootstrap placeholders** (`embedding_model_cutoffs`, cosine-distance space), so `vector_score` can overshoot 1.0. Recalibrate from reference Q/A pairs (workstream C) — ties into Phase 2.
+- **Section-focus UI selector** needs `MYGPT_WAREHOUSE_ID` set in `app.yaml` (powers `/api/sections`); the focus mechanism works regardless when a section is passed.
+- **OBO-through-agent** not yet exercised (Phase-1 corpus is non-PHI); the app forwards `x-forwarded-access-token`, to validate against RLS in Phase 4.
+- **Balanced-fidelity levers** still open per the Phase-1 "Settled design" note: full-corpus bm25s + content-dedup merge, first-class RF-HI, nomic self-managed embeddings.
