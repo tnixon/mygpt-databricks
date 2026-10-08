@@ -1,0 +1,4 @@
+# Dependencies for the gateway deploy job. The endpoint itself is pure routing
+# (external-model proxy) — no serving-image libs (torch/sentence-transformers) needed.
+mlflow>=3.1.0
+databricks-sdk>=0.40
