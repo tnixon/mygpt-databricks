@@ -6,10 +6,10 @@ Run on a Databricks cluster/notebook (or as a DABs job task). It:
   2. registers it to Unity Catalog;
   3. deploys it to a Model Serving endpoint via Mosaic AI Agent Framework.
 
-The embedding endpoint (`mygpt-bge-m3`), the Vector Search index, and the FMAPI
-chat endpoints are declared as `resources` so Agent Framework provisions the
-endpoint's auth to reach them. On-behalf-of-user auth (so AI Search retrieval runs
-as the signed-in user) is validated separately — see PLAN.md risks.
+The embeddings gateway endpoint (`mygpt-embeddings`, Phase 1b — proxies bge-m3), the
+Vector Search index, and the FMAPI chat endpoints are declared as `resources` so Agent
+Framework provisions the endpoint's auth to reach them. On-behalf-of-user auth (so AI
+Search retrieval runs as the signed-in user) is validated separately — see PLAN.md risks.
 
 Usage:
     python agents/rag_agent/driver.py --catalog structural_biology --schema mygpt
@@ -45,7 +45,9 @@ def main() -> None:
     ap.add_argument("--model-name", default="mygpt_rag_agent")
     ap.add_argument("--endpoint-name", default="mygpt-rag-agent")
     ap.add_argument("--vs-endpoint", default="mygpt-vs")
-    ap.add_argument("--embed-endpoint", default="mygpt-bge-m3")
+    # Phase 1b: embeddings are reached through the Unity AI Gateway endpoint, not the
+    # bge-m3 model endpoint directly. agent.py reads this via MYGPT_EMBED_ENDPOINT.
+    ap.add_argument("--embed-endpoint", default="mygpt-embeddings")
     ap.add_argument("--base-dir", default="")
     args = ap.parse_args()
 

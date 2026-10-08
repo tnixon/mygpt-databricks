@@ -1,21 +1,26 @@
-# MyGPT platform bundle (DABs) — Phase 1 infrastructure as code.
+# MyGPT platform bundle (DABs) — Phase 1 / 1b infrastructure as code.
 #
-# Deploys the ETL pipeline, the custom bge-m3 embedding endpoint, and the MyGPT
-# retrieval+scoring ResponsesAgent endpoint. The chat APP has its own bundle in
-# app/databricks.yml (bundle: st-jude-mygpt); this one owns the data/agent lane so
-# its job tasks can reference files under etl/ and agents/ (which live outside the
-# app bundle root). Everything here is deployed with `databricks bundle deploy`
-# (profile mygpt) — no hand-run CLI/notebook deploys.
+# Deploys the ETL pipeline, the custom bge-m3 embedding endpoint, the Unity AI
+# Gateway endpoint that fronts it (Phase 1b), and the MyGPT retrieval+scoring
+# ResponsesAgent endpoint. The chat APP has its own bundle in app/databricks.yml
+# (bundle: st-jude-mygpt); this one owns the data/agent lane so its job tasks can
+# reference files under etl/ and agents/ (which live outside the app bundle root).
+# Everything here is deployed with `databricks bundle deploy` (profile mygpt) — no
+# hand-run CLI/notebook deploys.
 #
 #   databricks bundle validate -p mygpt
 #   databricks bundle deploy   -p mygpt
 #   databricks bundle run mygpt_etl -p mygpt            # build tables + config
 #   databricks bundle run mygpt_deploy_embedding -p mygpt
+#   databricks bundle run mygpt_deploy_gateway -p mygpt   # AI Gateway (needs secret, below)
 #   databricks bundle run mygpt_deploy_agent -p mygpt
 #
-# NOTE: the Vector Search index (re)creation remains an API step (see the tail of
+# NOTE 1: the Vector Search index (re)creation remains an API step (see the tail of
 # etl/sql/02_parse_chunk_index.sql) because it must point the Delta Sync index at
-# the mygpt-bge-m3 endpoint and sync the new `section` column.
+# the mygpt-embeddings gateway endpoint and sync the `section` column.
+# NOTE 2: mygpt_deploy_gateway needs a secret token with CAN QUERY on mygpt-bge-m3:
+#   databricks secrets create-scope mygpt --profile mygpt   # if absent
+#   databricks secrets put-secret mygpt gw_upstream_token --profile mygpt
 
 bundle:
   name: st-jude-mygpt-platform
@@ -70,6 +75,25 @@ resources:
               - databricks-sdk>=0.40
               - sentence-transformers>=3.0.0
               - torch>=2.3
+
+    mygpt_deploy_gateway:
+      name: "[mygpt] Deploy Unity AI Gateway embeddings endpoint"
+      tasks:
+        - task_key: deploy_gateway
+          environment_key: default
+          spark_python_task:
+            python_file: agents/gateway/driver.py
+            parameters:
+              ["--catalog", "${var.catalog}", "--schema", "${var.schema}", "--base-dir", "${workspace.file_path}"]
+      environments:
+        - environment_key: default
+          spec:
+            client: "1"
+            # The gateway endpoint is pure routing (external-model proxy) — the deploy
+            # job only needs the SDK; no torch/sentence-transformers serving libs.
+            dependencies:
+              - mlflow>=3.1.0
+              - databricks-sdk>=0.40
 
     mygpt_deploy_agent:
       name: "[mygpt] Deploy MyGPT RAG ResponsesAgent endpoint"

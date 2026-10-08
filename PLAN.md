@@ -47,6 +47,42 @@ identity split, a basic chat UI with a simplified QRS, and a hand-run PDF-only E
   than a retrained first-class output; (c) bge-m3 managed embeddings chosen over nomic's self-managed
   `search_document:`/`search_query:` prefix flow.
 
+## Phase 1b — Unity AI Gateway in front of the embedding model
+- **Goal:** insert a Unity AI Gateway endpoint between the embedding model and its consumers, so
+  the model is reached through one governed, swappable interface rather than by hard-coded endpoint
+  name — the first step toward making the Unity Gateway the standard interface in front of all
+  models (anticipates the Phase 5 gateway item).
+- **Build:** an external-model serving endpoint `mygpt-embeddings` (provider
+  `databricks-model-serving`, task `llm/v1/embeddings`) proxying the existing `mygpt-bge-m3`
+  endpoint; re-point every embedding consumer (RAG agent + Vector Search managed embeddings) at it.
+- **Decisions (2026-10-07):** no separate OpenAI wrapper — `mygpt-bge-m3` already emits the OpenAI
+  embeddings envelope (`sentence_transformers` + `task="llm/v1/embeddings"`), so step 1 becomes a
+  contract test; gateway uses the `databricks-model-serving` provider (needs a secret token with
+  CAN QUERY on `mygpt-bge-m3`, scope `mygpt` key `gw_upstream_token`); Vector Search is re-pointed
+  too (requires recreating `doc_chunks_index` + a full re-embed through the gateway).
+- **Databricks:** Mosaic AI Gateway (external models), Model Serving, Databricks AI Search.
+- **Depends on:** Phase 1. **Blocks nothing** — a drop-in indirection ahead of Phase 2.
+
+### Code map (as-planned)
+- `agents/gateway/{driver.py,requirements.txt,smoke_test.py}` — new deploy lane for `mygpt-embeddings`.
+- `databricks.yml` — new `mygpt_deploy_gateway` job + secret/run-command notes.
+- `agents/rag_agent/driver.py` — `--embed-endpoint` default → `mygpt-embeddings` (agent.py unchanged;
+  reads `MYGPT_EMBED_ENDPOINT`).
+- `etl/sql/02_parse_chunk_index.sql` — index `embedding_model_endpoint_name` → `mygpt-embeddings`.
+- `agents/embedding/smoke_test.py` — raw-path OpenAI-envelope assertions (the proxied contract).
+- **App:** no change — it calls the `mygpt-rag-agent` endpoint, not embeddings.
+
+### Deploy order
+`bundle deploy` → put secret `mygpt/gw_upstream_token` → `run mygpt_deploy_gateway` →
+`python agents/gateway/smoke_test.py` → recreate+sync `doc_chunks_index` (gateway endpoint) →
+`run mygpt_deploy_agent` → re-run the Phase-1 validation query (scores should match baseline).
+
+### Watch-items
+- Vector-Search-over-external-model may need the "AI Query for Custom Models and External Models"
+  preview; if blocked, keep VS pointed at `mygpt-bge-m3` directly and front only the agent.
+- Extra hop at query time (gateway → bge-m3); `mygpt-bge-m3` stays always-on, gateway is routing-only.
+- `databricks-model-serving` token rotation is a standing operational item.
+
 ## Phase 2 — Evaluation harness (measurement-first)
 - **Goal:** make quality measurable before we scale — gate every later phase on it.
 - **Build:** `eval/` — MLflow 3 `genai.evaluate()` harness seeded from MyGPT-evaluations gold data; map QRS→RetrievalGroundedness, ARS→Correctness, HI→Guidelines + custom scorers (kinase extraction accuracy, structured-output validity); register datasets in UC.
