@@ -345,8 +345,10 @@ class MyGPTRagAgent(ResponsesAgent):
                 "POST", f"/api/2.0/vector-search/indexes/{VS_INDEX}/query", body=payload
             )
         except Exception as exc:  # noqa: BLE001
-            print(f"[retrieve] vector search unavailable: {type(exc).__name__}: {exc}")
+            self._last_retrieve_error = f"{type(exc).__name__}: {exc}"
+            print(f"[retrieve] vector search unavailable: {self._last_retrieve_error}")
             return []
+        self._last_retrieve_error = None
         cols = [c["name"] for c in (res.get("manifest", {}) or {}).get("columns", [])]
         rows = res.get("result", {}).get("data_array", []) or []
         sources: list[dict] = []
@@ -451,7 +453,11 @@ class MyGPTRagAgent(ResponsesAgent):
             item = self.create_text_output_item(
                 "I couldn't find anything relevant in the indexed documents.", str(uuid.uuid4())
             )
-            return ResponsesAgentResponse(output=[item], custom_outputs={"qrs": 0, "ars": 0, "hi_eq": 100, "sources": []})
+            return ResponsesAgentResponse(output=[item], custom_outputs={
+                "qrs": 0, "ars": 0, "hi_eq": 100, "sources": [],
+                # Surface the caught retrieval error instead of silently returning [].
+                "retrieve_error": getattr(self, "_last_retrieve_error", None),
+            })
 
         sources = self._rerank(query, sources, cfg)
         qrs, question_semantic, sources = self._score_question(sources, cfg)

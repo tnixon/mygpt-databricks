@@ -45,9 +45,12 @@ def main() -> None:
     ap.add_argument("--model-name", default="mygpt_rag_agent")
     ap.add_argument("--endpoint-name", default="mygpt-rag-agent")
     ap.add_argument("--vs-endpoint", default="mygpt-vs")
-    # Phase 1b: embeddings are reached through the Unity AI Gateway endpoint, not the
-    # bge-m3 model endpoint directly. agent.py reads this via MYGPT_EMBED_ENDPOINT.
+    # Phase 1b: the agent's own embedding calls are reached through the Unity AI Gateway
+    # endpoint, not the bge-m3 model endpoint directly. agent.py reads MYGPT_EMBED_ENDPOINT.
     ap.add_argument("--embed-endpoint", default="mygpt-embeddings")
+    # The Vector Search index's managed-embedding model, invoked at query time with the
+    # agent's identity — declared as a resource so retrieval has CAN QUERY on it.
+    ap.add_argument("--vs-embed-endpoint", default="mygpt-bge-m3")
     ap.add_argument("--base-dir", default="")
     args = ap.parse_args()
 
@@ -63,9 +66,17 @@ def main() -> None:
     mlflow.set_experiment(f"/Users/{WorkspaceClient().current_user.me().user_name}/mygpt_phase1")
 
     # Resources the serving endpoint must reach (auth provisioned by Agent Framework).
+    # NOTE: two embedding endpoints are declared on purpose:
+    #   * args.embed_endpoint (mygpt-embeddings, the AI Gateway) — the agent's own
+    #     answer-scoring _embed() calls go through the gateway (Phase 1b);
+    #   * args.vs_embed_endpoint (mygpt-bge-m3) — the Vector Search index embeds the
+    #     QUERY at retrieval time through its managed-embedding model using the agent's
+    #     identity, so the agent must also hold CAN QUERY on that model endpoint or
+    #     retrieval fails with PermissionDenied.
     resources = [
         DatabricksVectorSearchIndex(index_name=vs_index),
         DatabricksServingEndpoint(endpoint_name=args.embed_endpoint),
+        DatabricksServingEndpoint(endpoint_name=args.vs_embed_endpoint),
         DatabricksServingEndpoint(endpoint_name="databricks-claude-sonnet-5"),
         DatabricksServingEndpoint(endpoint_name="databricks-llama-4-maverick"),
         DatabricksServingEndpoint(endpoint_name="databricks-gpt-oss-120b"),

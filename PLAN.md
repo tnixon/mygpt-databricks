@@ -54,28 +54,56 @@ identity split, a basic chat UI with a simplified QRS, and a hand-run PDF-only E
   models (anticipates the Phase 5 gateway item).
 - **Build:** an external-model serving endpoint `mygpt-embeddings` (provider
   `databricks-model-serving`, task `llm/v1/embeddings`) proxying the existing `mygpt-bge-m3`
-  endpoint; re-point every embedding consumer (RAG agent + Vector Search managed embeddings) at it.
+  endpoint; re-point embedding consumers at it.
 - **Decisions (2026-10-07):** no separate OpenAI wrapper — `mygpt-bge-m3` already emits the OpenAI
-  embeddings envelope (`sentence_transformers` + `task="llm/v1/embeddings"`), so step 1 becomes a
-  contract test; gateway uses the `databricks-model-serving` provider (needs a secret token with
-  CAN QUERY on `mygpt-bge-m3`, scope `mygpt` key `gw_upstream_token`); Vector Search is re-pointed
-  too (requires recreating `doc_chunks_index` + a full re-embed through the gateway).
+  embeddings envelope via the OpenAI-client path (`sentence_transformers` + `task="llm/v1/embeddings"`;
+  note the raw `/invocations` path returns a bare vector list, which `_parse_embeddings` already
+  handles), so step 1 is a contract test; gateway uses the `databricks-model-serving` provider
+  (needs a secret token with CAN QUERY on `mygpt-bge-m3`, scope `mygpt` key `gw_upstream_token`).
 - **Databricks:** Mosaic AI Gateway (external models), Model Serving, Databricks AI Search.
 - **Depends on:** Phase 1. **Blocks nothing** — a drop-in indirection ahead of Phase 2.
 
-### Code map (as-planned)
-- `agents/gateway/{driver.py,requirements.txt,smoke_test.py}` — new deploy lane for `mygpt-embeddings`.
-- `databricks.yml` — new `mygpt_deploy_gateway` job + secret/run-command notes.
-- `agents/rag_agent/driver.py` — `--embed-endpoint` default → `mygpt-embeddings` (agent.py unchanged;
-  reads `MYGPT_EMBED_ENDPOINT`).
-- `etl/sql/02_parse_chunk_index.sql` — index `embedding_model_endpoint_name` → `mygpt-embeddings`.
-- `agents/embedding/smoke_test.py` — raw-path OpenAI-envelope assertions (the proxied contract).
+### As-built (deployed + validated 2026-10-08)
+- **Gateway live:** `mygpt-embeddings` external-model endpoint (READY), proxying `mygpt-bge-m3`.
+  Smoke test passes: raw `/invocations` returns 2×1024-dim vectors.
+- **RAG agent re-pointed:** redeployed with `MYGPT_EMBED_ENDPOINT=mygpt-embeddings` (its
+  answer-scoring `_embed` calls now traverse the gateway).
+- **Validated end-to-end:** "What biomarkers predict effective temozolomide dosing in glioblastoma?"
+  → grounded cited answer, **QRS 54 / ARS 86 / HI 0**, correct temozolomide sources (rerank ~0.997),
+  matching the Phase-1 baseline (56 / 82 / 0). Non-zero ARS confirms the agent's `_embed` runs
+  through the gateway. (A terse keyword string like "temozolomide dosing biomarkers" trips the QNLI
+  reranker, which expects a question — expected behavior, not a regression.)
+- **Vector Search stays DIRECT on `mygpt-bge-m3`.** AI Search **rejects** the external-model
+  gateway endpoint as a managed embedding model ("unsupported embedding response") in this
+  workspace — the Custom/External Models managed-embedding path isn't available. Fallback applied:
+  index kept on the model endpoint. Revisit if the "AI Query for Custom Models and External Models"
+  preview lands.
+- **ROOT-CAUSE GOTCHA (cost hours):** the agent declares its reachable resources in
+  `driver.py`; the VS index embeds the QUERY at retrieval time through its managed-embedding
+  model (`mygpt-bge-m3`) **using the agent's identity**. Pointing `--embed-endpoint` at the
+  gateway dropped `mygpt-bge-m3` from the declared resources → retrieval `PermissionDenied` →
+  caught → silent `[]` → "couldn't find anything". FIX: declare **both** `mygpt-embeddings`
+  (scoring) and `mygpt-bge-m3` (`--vs-embed-endpoint`, VS query-time embedding) as resources.
+  agent.py now also surfaces the caught retrieval error in `custom_outputs.retrieve_error`
+  instead of returning `[]` silently.
+- **DEPLOY GOTCHA:** `databricks bundle run <job>` re-logs the **workspace** copy of the code;
+  always `databricks bundle deploy` after editing `agents/**` before `bundle run`, or the driver
+  logs stale code (three redeploys silently re-logged unchanged code before this was caught).
+
+### Code map (as-built)
+- `agents/gateway/{driver.py,requirements.txt,smoke_test.py}` — deploy lane + contract test for `mygpt-embeddings`.
+- `databricks.yml` — `mygpt_deploy_gateway` job + secret/run-command notes.
+- `agents/rag_agent/driver.py` — `--embed-endpoint` → `mygpt-embeddings` + new `--vs-embed-endpoint`
+  (`mygpt-bge-m3`); BOTH declared as agent resources. `agent.py` surfaces `retrieve_error` on empty retrieval.
+- `agents/embedding/smoke_test.py` — raw-vector-list + best-effort OpenAI-client contract checks.
+- `etl/sql/02_parse_chunk_index.sql` — index stays on `mygpt-bge-m3`, with a note on the AI Search limitation.
 - **App:** no change — it calls the `mygpt-rag-agent` endpoint, not embeddings.
 
-### Deploy order
-`bundle deploy` → put secret `mygpt/gw_upstream_token` → `run mygpt_deploy_gateway` →
-`python agents/gateway/smoke_test.py` → recreate+sync `doc_chunks_index` (gateway endpoint) →
-`run mygpt_deploy_agent` → re-run the Phase-1 validation query (scores should match baseline).
+### Deploy order (as-run)
+`bundle deploy --var warehouse_id=<id>` → put secret `mygpt/gw_upstream_token` →
+`run mygpt_deploy_gateway` → `python agents/gateway/smoke_test.py` → `run mygpt_deploy_agent` →
+re-run the Phase-1 validation query. (The attempted VS re-point to the gateway is NOT part of the
+final flow — it fails AI Search validation; keep the index on `mygpt-bge-m3`.)
 
 ### Watch-items
 - Vector-Search-over-external-model may need the "AI Query for Custom Models and External Models"

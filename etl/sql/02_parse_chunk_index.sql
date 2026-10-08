@@ -6,8 +6,7 @@
 --     so the agent can metadata-filter retrieval to a document/section (gap 13);
 --   * merges the fine-grained ai_parse_document elements into ~1000-char,
 --     section-bounded chunks (MyGPT chunksize=1000, overlap=false);
---   * re-embeds via the `mygpt-embeddings` AI Gateway endpoint, which proxies the
---     custom bge-m3 model endpoint (gap 1; Phase 1b gateway hop — see step 4 below).
+--   * re-embeds via the custom `mygpt-bge-m3` Model Serving endpoint (gap 1).
 -- This file is run as a task of the DABs ETL job (see databricks.yml).
 
 -- 1) Parse each FILE and explode into document elements, tagging section headers.
@@ -114,16 +113,16 @@ SELECT
 FROM structural_biology.mygpt.doc_chunks
 GROUP BY section;
 
--- 4) Vector Search endpoint + Delta Sync index (MANAGED embeddings). Phase 1b routes
---    the managed embeddings through the Unity AI Gateway endpoint `mygpt-embeddings`
---    (which proxies the bge-m3 model endpoint) instead of calling `mygpt-bge-m3`
---    directly, so the backing model is swappable without re-pointing the index.
---    `section` is synced so the agent can filter on it. These are CLI/API, not SQL.
+-- 4) Vector Search endpoint + Delta Sync index (MANAGED embeddings via the custom
+--    bge-m3 endpoint). `section` is now synced so the agent can filter on it. These
+--    are CLI/API, not SQL. Recreate the index (embedding model + columns changed) then sync:
 --
---    PREREQ: deploy the gateway first (`databricks bundle run mygpt_deploy_gateway`)
---    and ensure the Vector Search service principal has CAN QUERY on mygpt-embeddings.
---    embedding_model_endpoint_name is NOT editable in place, so recreating the index
---    triggers a FULL re-embed of all chunks through the gateway — run when idle.
+--    NOTE (Phase 1b): AI Search managed embeddings call the MODEL endpoint `mygpt-bge-m3`
+--    directly here — NOT the `mygpt-embeddings` AI Gateway endpoint. AI Search rejects the
+--    external-model (gateway) endpoint ("unsupported embedding response") in this workspace,
+--    since the Custom/External Models managed-embedding path isn't available. The gateway
+--    still fronts the RAG agent's embedding calls; only Vector Search stays on the model
+--    endpoint. Revisit if the "AI Query for Custom Models and External Models" preview lands.
 --
 --    databricks vector-search-indexes delete-index structural_biology.mygpt.doc_chunks_index --profile mygpt
 --    databricks vector-search-indexes create-index --profile mygpt --json '{
@@ -135,7 +134,7 @@ GROUP BY section;
 --        "source_table": "structural_biology.mygpt.doc_chunks",
 --        "pipeline_type": "TRIGGERED",
 --        "embedding_source_columns": [
---          {"name": "chunk_text", "embedding_model_endpoint_name": "mygpt-embeddings"}
+--          {"name": "chunk_text", "embedding_model_endpoint_name": "mygpt-bge-m3"}
 --        ],
 --        "columns_to_sync": ["chunk_id","doc_id","source_name","section","page","elem_type","chunk_text"]
 --      }
