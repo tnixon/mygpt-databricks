@@ -1,0 +1,27 @@
+# Phase-2 quality gates for `run_eval.py --gate` (minimum per-run aggregate metric).
+# Metric names are MLflow's `<assessment>/mean` aggregates (bool / yes-no -> 1/0).
+#
+# Hard gates (pipeline health + output contract) apply from day one. Judge thresholds
+# are `null` (not enforced) until the Phase-2 baseline runs land — then set each to
+# just under its baseline value (see PLAN.md, Phase 2 as-built) so later phases can't
+# silently regress.
+
+shared:
+  retrieval_ok/mean: 1.0          # every row retrieved >= 1 source, no retrieve_error
+  focus_adherence/mean: 1.0       # all sources come from the focused document
+  retrieval_groundedness/mean: null
+  retrieval_relevance/mean: null
+  relevance_to_query/mean: null
+  safety/mean: null
+
+sj_global:
+  yes_no_format/mean: 0.95        # answers open with Yes / No
+  expectations_guidelines/mean: null
+  mygpt_grounding/mean: null
+
+bluesky:
+  js_array_valid/mean: 0.95       # structured-output validity
+  figure_ref_format/mean: null
+  vocab_compliance/mean: null     # enforce once expression_systems_list.csv lands
+  no_match_consistent/mean: null
+  expectations_guidelines/mean: null

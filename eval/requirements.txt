@@ -1,0 +1,6 @@
+# Eval-harness job environment (serverless). Mirrors the `mygpt_eval*` job specs in
+# databricks.yml; no torch — the agent is evaluated through its serving endpoint.
+mlflow[databricks]>=3.4
+databricks-sdk>=0.40
+pyyaml
+pytest            # local: uv run --with-requirements eval/requirements.txt pytest eval/

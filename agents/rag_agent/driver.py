@@ -51,6 +51,10 @@ def main() -> None:
     # The Vector Search index's managed-embedding model, invoked at query time with the
     # agent's identity — declared as a resource so retrieval has CAN QUERY on it.
     ap.add_argument("--vs-embed-endpoint", default="mygpt-bge-m3")
+    # Phase 2: one shared experiment holds the LoggedModels, the eval runs (eval/), and
+    # the endpoint's production traces (Agent Framework logs them to the model's experiment).
+    # Declared as a DABs resource in databricks.yml.
+    ap.add_argument("--experiment", default="/Shared/mygpt/mygpt-rag-agent")
     ap.add_argument("--base-dir", default="")
     args = ap.parse_args()
 
@@ -60,10 +64,8 @@ def main() -> None:
     rf_pkl = os.path.join(here, "artifacts", "random_forest_hybrid_model_base.pkl")
 
     mlflow.set_registry_uri("databricks-uc")
-    # Serverless jobs have no default experiment — set one under the runner's home.
-    from databricks.sdk import WorkspaceClient
-
-    mlflow.set_experiment(f"/Users/{WorkspaceClient().current_user.me().user_name}/mygpt_phase1")
+    # Serverless jobs have no default experiment — use the shared, bundle-managed one.
+    mlflow.set_experiment(args.experiment)
 
     # Resources the serving endpoint must reach (auth provisioned by Agent Framework).
     # NOTE: two embedding endpoints are declared on purpose:
@@ -94,7 +96,7 @@ def main() -> None:
         )
 
     registered = mlflow.register_model(model_uri=logged.model_uri, name=uc_model)
-    print(f"Registered {uc_model} v{registered.version}")
+    print(f"Registered {uc_model} v{registered.version} (LoggedModel {logged.model_id})")
 
     # Deploy via Mosaic AI Agent Framework (creates/updates the serving endpoint).
     from databricks import agents

@@ -119,6 +119,38 @@ final flow — it fails AI Search validation; keep the index on `mygpt-bge-m3`.)
 - **Depends on:** Phase 1 (scores to measure) + a seed corpus indexed (Phase 0 ETL).
 - **Closes gaps:** the `eval/` component.
 
+**Settled design (detailed plan approved 2026-10-08):**
+- **Scope = the two St. Jude use cases only:** SJ Global (`health_policies`, FR + ES) and BlueSky
+  (`kinase_literature`). Public benchmarks (BioASQ / PubMedQA / Open-RAG-Bench / QRS-ARS-cutoff) are deferred.
+- **Guidelines-only grading** (no gold answers yet): built-in judges + code scorers. Expectations
+  tables leave room for SME-labelled `expected_facts` later.
+- **Corpus isolation = a `corpus` column** (the top-level docs-volume folder) on chunks + the index;
+  the agent filters on `custom_inputs.corpus` (absent = all corpora, so the app is unchanged).
+- **One shared, DAB-managed experiment** `/Shared/mygpt/mygpt-rag-agent` for LoggedModels, eval runs
+  (linked by `model_id`), and production traces/monitoring.
+- **Kinase PDFs + expression-system vocabulary come from St. Jude.**
+
+### Status (2026-10-08): code complete, workspace rollout pending
+- **Done:**
+  - ETL `corpus` column + per-corpus `dataset_config` rows (FR/ES run reranker-off).
+  - Agent: `corpus` / `instructions` custom inputs, a Document-shaped RETRIEVER span, `mygpt.*`
+    trace tags, and the shared experiment.
+  - `eval/`: datasets, scorers, runner, gates, monitor; 24 unit tests pass.
+  - DAB jobs `mygpt_eval_build_datasets` / `mygpt_eval` / `mygpt_eval_monitor`.
+  - `/api/sections` filters `dataset_name='mygpt'`.
+  - Bundle deployed; FR/ES policy PDFs uploaded to `docs/health_policies_{fr,es}/`.
+- **Pending (changes the shared corpus behind the live app):**
+  1. Run `mygpt_etl`.
+  2. Recreate + sync the index with `corpus` synced.
+  3. Run `mygpt_deploy_agent`. The new agent requests the `corpus` column, so it must follow the
+     index rebuild.
+  4. Re-run the Phase-1b validation query.
+  5. Build the datasets, run the baseline evals, and set the judge gates in `eval/gates.yaml`.
+  6. Run `mygpt_eval_monitor`.
+  7. Redeploy the app.
+- The legacy `docs/policy/` folder (10 mixed FR/ES PDFs) is now outside the corpus allow-list.
+  The same files live under `health_policies_{fr,es}/`, so `policy/` can be deleted.
+
 ## Phase 3 — Production ingestion lane
 - **Goal:** replace the hand-run SQL with a governed, distributed, resumable pipeline feeding real corpora.
 - **Build:** `etl/` — Lakeflow Connect SharePoint/OneDrive → UC medallion; Spark + Jobs/Workflows (resumable, parallel) parse/chunk/embed/index; format coverage (DOCX/TXT, spreadsheets→structured tables, YouTube transcripts, Zotero); PHI scan on ingest; one-time ChromaDB → AI Search migration job.
