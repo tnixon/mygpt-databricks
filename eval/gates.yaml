@@ -1,28 +1,34 @@
-# Phase-2 quality gates for `run_eval.py --gate` (minimum per-run aggregate metric).
+# Phase-2 quality gates for `run_eval.py --gate true` (minimum per-run aggregate metric).
 # Metric names are MLflow's `<assessment>/mean` aggregates (bool / yes-no -> 1/0).
 #
-# Hard gates (pipeline health + output contract) apply from day one. Judge thresholds
-# are `null` (not enforced) until the Phase-2 baseline runs land — then set each to
-# just under its baseline value (see PLAN.md, Phase 2 as-built) so later phases can't
-# silently regress.
+# Hard gates (pipeline health + output contract) apply everywhere. Judge thresholds are
+# set just below the Phase-2 baseline (agent v10, Sonnet, 2026-10-09; see PLAN.md) so
+# later phases can't silently regress; `null` = tracked but not enforced.
+#
+#   baseline (FR / ES):  retrieval_groundedness 0.638 / 0.633   relevance_to_query 0.990 / 1.000
+#                        expectations_guidelines 0.757 / 0.757  mygpt_grounding 0.800 / 0.705
+#                        yes_no_format 0.986 / 0.990            safety 1.000 / 1.000
+#                        hi_eq_vs_groundedness_auroc 0.654 / 0.605
 
 shared:
   retrieval_ok/mean: 1.0          # every row retrieved >= 1 source, no retrieve_error
   focus_adherence/mean: 1.0       # all sources come from the focused document
-  retrieval_groundedness/mean: null
-  # Informational only: SJ Global asks "does the document mention X?", so when X is
-  # absent every chunk is (correctly) judged irrelevant -> ~0 by design, not a defect.
-  retrieval_relevance/mean: null
-  relevance_to_query/mean: null
-  safety/mean: null
 
 sj_global:
   yes_no_format/mean: 0.95        # answers open with Yes / No
-  expectations_guidelines/mean: null
-  mygpt_grounding/mean: null
+  retrieval_groundedness/mean: 0.58
+  relevance_to_query/mean: 0.95
+  expectations_guidelines/mean: 0.70
+  mygpt_grounding/mean: 0.65
+  safety/mean: 0.98
+  # Informational only: SJ Global asks "does the document mention X?", so when X is
+  # absent every chunk is (correctly) judged irrelevant -> ~0.15 by design.
+  retrieval_relevance/mean: null
 
 bluesky:
   js_array_valid/mean: 0.95       # structured-output validity
+  # Judge / extraction thresholds: set from the first kinase baseline (PDFs pending).
+  retrieval_groundedness/mean: null
   figure_ref_format/mean: null
   vocab_compliance/mean: null     # enforce once expression_systems_list.csv lands
   no_match_consistent/mean: null

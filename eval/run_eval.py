@@ -51,6 +51,21 @@ def served_model_id(endpoint: str) -> tuple[str | None, str | None]:
         return None, None
 
 
+def persisted_results(run_id: str):
+    """Per-row results as persisted on the run's traces ([trace_id, request, <name>/value, ...]).
+    Used for the post-run metrics instead of EvaluationResult.result_df, which can be
+    missing assessments that are still being logged when evaluate() returns."""
+    import mlflow
+    import pandas as pd
+    from mlflow.genai.utils.trace_utils import _get_assessment_values
+
+    df = mlflow.search_traces(run_id=run_id, return_type="pandas")
+    if df is None or df.empty:
+        return None
+    values = df["assessments"].apply(lambda a: _get_assessment_values(a, run_id)).apply(pd.Series)
+    return pd.concat([df[["trace_id", "request"]], values], axis=1)
+
+
 def _request_of(row) -> dict:
     req = row.get("request")
     if isinstance(req, str):
@@ -58,7 +73,12 @@ def _request_of(row) -> dict:
             req = json.loads(req)
         except json.JSONDecodeError:
             return {}
-    return req if isinstance(req, dict) else {}
+    if not isinstance(req, dict):
+        return {}
+    # The agent endpoint's root span records its argument as {"request": <ResponsesAgentRequest>}.
+    if "custom_inputs" not in req and isinstance(req.get("request"), dict):
+        req = req["request"]
+    return req
 
 
 def auroc(scores: list[float], positives: list[bool]) -> float | None:
@@ -129,12 +149,19 @@ def main() -> None:
     ap.add_argument("--experiment", default="/Shared/mygpt/mygpt-rag-agent")
     ap.add_argument("--max-rows", type=int, default=0, help="smoke-test on the first N rows (0 = all)")
     ap.add_argument("--gate", default="false", help="true = exit non-zero if eval/gates.yaml isn't met")
+    # The agent endpoint is CPU Small (~4 concurrent requests, ~6s/row warm): keep eval
+    # parallelism near that and allow for queueing / cold starts rather than timing out.
+    ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--predict-timeout", type=int, default=300, help="seconds per endpoint call")
     ap.add_argument("--git-sha", default="")
     ap.add_argument("--base-dir", default="")
     args = ap.parse_args()
 
     base = _base_dir(args.base_dir)
     sys.path.insert(0, os.path.join(base, "eval"))
+    # Must be set before mlflow reads them (at predict / evaluate time).
+    os.environ["MLFLOW_GENAI_EVAL_MAX_WORKERS"] = str(args.workers)
+    os.environ["MLFLOW_DEPLOYMENT_PREDICT_TIMEOUT"] = str(args.predict_timeout)
     import eval_datasets
     import mlflow
     import scorers as sc
@@ -155,7 +182,7 @@ def main() -> None:
     vocab = eval_datasets.expression_systems(base) if spec.use_case == "bluesky" else None
     model_id, served = served_model_id(args.endpoint)
 
-    with mlflow.start_run(run_name=f"{args.dataset}-{args.model}"):
+    with mlflow.start_run(run_name=f"{args.dataset}-{args.model}") as run:
         mlflow.set_tags({
             "mygpt.eval.dataset": spec.uc_table, "mygpt.eval.use_case": spec.use_case,
             "mygpt.eval.model_alias": args.model, "mygpt.eval.endpoint": args.endpoint,
@@ -166,12 +193,13 @@ def main() -> None:
             data=data, predict_fn=predict_fn, scorers=sc.scorers_for(spec.use_case, vocab), model_id=model_id,
         )
         metrics = dict(result.metrics)
+        rows = persisted_results(run.info.run_id)
 
-        if (auc := hi_vs_groundedness(result.result_df)) is not None:
+        if (auc := hi_vs_groundedness(rows)) is not None:
             mlflow.log_metric("hi_eq_vs_groundedness_auroc", auc)
             metrics["hi_eq_vs_groundedness_auroc"] = auc
         if spec.use_case == "sj_global":
-            matrix = coding_matrix(result.result_df, eval_datasets.build_records(args.dataset, base))
+            matrix = coding_matrix(rows, eval_datasets.build_records(args.dataset, base))
             if matrix is not None:
                 mlflow.log_table(matrix.reset_index(), artifact_file="coding_matrix.json")
 

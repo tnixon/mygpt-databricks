@@ -172,7 +172,8 @@ resources:
         - task_key: eval
           for_each_task:
             inputs: "{{job.parameters.matrix}}"
-            concurrency: 2
+            # one dataset at a time: the agent endpoint (CPU Small) is the bottleneck
+            concurrency: 1
             task:
               task_key: eval_one
               environment_key: eval

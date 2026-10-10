@@ -55,7 +55,7 @@ def main() -> None:
     # agent's identity — declared as a resource so retrieval has CAN QUERY on it.
     ap.add_argument("--vs-embed-endpoint", default="mygpt-bge-m3")
     # Phase 2: one shared experiment holds the LoggedModels, the eval runs (eval/), and
-    # the endpoint's production traces (Agent Framework logs them to the model's experiment).
+    # the endpoint's production traces (pinned via MLFLOW_EXPERIMENT_ID below).
     # Declared as a DABs resource in databricks.yml.
     ap.add_argument("--experiment", default="/Shared/mygpt/mygpt-rag-agent")
     ap.add_argument("--base-dir", default="")
@@ -68,7 +68,7 @@ def main() -> None:
 
     mlflow.set_registry_uri("databricks-uc")
     # Serverless jobs have no default experiment — use the shared, bundle-managed one.
-    mlflow.set_experiment(args.experiment)
+    experiment_id = mlflow.set_experiment(args.experiment).experiment_id
 
     # Resources the serving endpoint must reach (auth provisioned by Agent Framework).
     # NOTE: two embedding endpoints are declared on purpose:
@@ -114,6 +114,11 @@ def main() -> None:
             "MYGPT_VS_ENDPOINT": args.vs_endpoint,
             "MYGPT_EMBED_ENDPOINT": args.embed_endpoint,
             "MYGPT_RF_MODEL_PATH": "/model/artifacts/rf_model/random_forest_hybrid_model_base.pkl",
+            # Pin production traces to the shared experiment explicitly: agents.deploy
+            # otherwise keeps the experiment already attached to an existing endpoint
+            # (here the Phase-1 /Users/<me>/mygpt_phase1), which would starve the
+            # monitoring scorers registered on /Shared/mygpt/mygpt-rag-agent.
+            "MLFLOW_EXPERIMENT_ID": experiment_id,
             # Set MYGPT_WAREHOUSE_ID to read live config from Delta; omit for packaged defaults.
         },
         scale_to_zero_enabled=True,

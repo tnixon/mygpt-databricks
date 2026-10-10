@@ -130,26 +130,64 @@ final flow — it fails AI Search validation; keep the index on `mygpt-bge-m3`.)
   (linked by `model_id`), and production traces/monitoring.
 - **Kinase PDFs + expression-system vocabulary come from St. Jude.**
 
-### Status (2026-10-08): code complete, workspace rollout pending
-- **Done:**
-  - ETL `corpus` column + per-corpus `dataset_config` rows (FR/ES run reranker-off).
-  - Agent: `corpus` / `instructions` custom inputs, a Document-shaped RETRIEVER span, `mygpt.*`
-    trace tags, and the shared experiment.
-  - `eval/`: datasets, scorers, runner, gates, monitor; 24 unit tests pass.
-  - DAB jobs `mygpt_eval_build_datasets` / `mygpt_eval` / `mygpt_eval_monitor`.
-  - `/api/sections` filters `dataset_name='mygpt'`.
-  - Bundle deployed; FR/ES policy PDFs uploaded to `docs/health_policies_{fr,es}/`.
-- **Pending (changes the shared corpus behind the live app):**
-  1. Run `mygpt_etl`.
-  2. Recreate + sync the index with `corpus` synced.
-  3. Run `mygpt_deploy_agent`. The new agent requests the `corpus` column, so it must follow the
-     index rebuild.
-  4. Re-run the Phase-1b validation query.
-  5. Build the datasets, run the baseline evals, and set the judge gates in `eval/gates.yaml`.
-  6. Run `mygpt_eval_monitor`.
-  7. Redeploy the app.
-- The legacy `docs/policy/` folder (10 mixed FR/ES PDFs) is now outside the corpus allow-list.
-  The same files live under `health_policies_{fr,es}/`, so `policy/` can be deleted.
+### As-built (deployed + baselined 2026-10-09)
+- **Corpus:** `docs/{biomed,health_policies_fr,health_policies_es}/` → `doc_chunks` with `corpus`
+  (biomed 661 / FR 1,790 / ES 2,567 chunks; all 20 policy PDFs parse). New index
+  **`doc_chunks_corpus_index`** (5,018 rows, syncs `corpus`), created *alongside* the Phase-1
+  `doc_chunks_index` instead of replacing it, so there was no retrieval downtime. The old index
+  and the legacy `docs/policy/` folder are now unused and can be deleted.
+- **Agent v10** (LoggedModel `m-da490313…`) live at 100%. Regression query unchanged:
+  QRS 54 / ARS 87 / HI 0, vs the Phase-1b 54 / 86 / 0.
+- **UC eval datasets:** `eval_health_policies_{fr,es}` (210 each), `eval_kinase_literature` (282).
+- **Baseline** (Sonnet, agent v10, 210 rows each; eval runs `950baa3c…` FR / `20abddbd…` ES in
+  `/Shared/mygpt/mygpt-rag-agent`):
+
+  | metric | FR | ES |
+  |---|---|---|
+  | retrieval_ok / focus_adherence | 1.000 / 1.000 | 1.000 / 1.000 |
+  | yes_no_format | 0.986 | 0.990 |
+  | retrieval_groundedness | 0.638 | 0.633 |
+  | relevance_to_query | 0.990 | 1.000 |
+  | expectations_guidelines | 0.757 | 0.757 |
+  | mygpt_grounding (Guidelines) | 0.800 | 0.705 |
+  | safety | 1.000 | 1.000 |
+  | QRS / ARS / HI_eq (means) | 65.9 / 73.6 / 5.9 | 65.9 / 74.4 / 6.4 |
+  | HI_eq-vs-groundedness AUROC | 0.654 | 0.605 |
+
+  Gates in `eval/gates.yaml` are set just below these numbers. `retrieval_relevance` (~0.15) is
+  informational: "does the policy mention X?" questions make chunks legitimately irrelevant
+  whenever X is absent. A groundedness of ~0.63 and an AUROC of ~0.6 are the first real
+  Phase-2 findings: about a third of the policy answers include unsupported detail, and MyGPT's
+  HI predicts that only weakly. These are good targets for later phases (and for HI-RF retraining).
+- **Production monitoring:** `retrieval_ok`, `mygpt_trust` (20%), and Safety / RelevanceToQuery /
+  RetrievalGroundedness (10%) are registered on the shared experiment, sampling app traffic only
+  (`mygpt.corpus = all`).
+- **App** redeployed (`/api/sections` filters `dataset_name = 'mygpt'`).
+
+### Bugs found by the eval (fixed)
+- **Agent:** Sonnet 5 can return `message.content` as reasoning + text blocks. `_generate`
+  passed the list through, so answer scoring sent dicts to bge-m3 (HTTP 400). This affected
+  2/5 smoke rows and would have hit the app too. Fixed: keep only text blocks.
+- **Trace experiment:** `agents.deploy` keeps the experiment already attached to an existing
+  endpoint (the Phase-1 `/Users/<me>/mygpt_phase1`), so production traces missed the shared
+  experiment and its monitors. Fixed: the driver pins `MLFLOW_EXPERIMENT_ID`. **Takes effect on
+  the next `mygpt_deploy_agent`.**
+- **run_eval:**
+  - The endpoint serves every old version at 0% traffic, so the LoggedModel is now resolved from
+    the traffic routes.
+  - Post-run metrics now read the run's persisted traces, not `result_df`.
+  - The endpoint root span nests the request as `{"request": …}`, which had left the coding
+    matrix empty.
+  - Eval parallelism is matched to the CPU-Small endpoint: 4 workers, 300 s timeout, one dataset
+    at a time.
+- **build_datasets:** on Databricks, `create_dataset` rejects dataset-level tags, and it needs
+  `databricks-agents` in the job env.
+
+### Still open
+- Redeploy the agent (v11) for the trace-experiment pin, then confirm app traces and monitor
+  assessments land in `/Shared/mygpt/mygpt-rag-agent`.
+- BlueSky: blocked on St. Jude's kinase PDFs and `expression_systems_list.csv`.
+- llama / gptoss baselines (`mygpt_eval` matrix override via `jobs run-now`, see eval/README).
 
 ## Phase 3 — Production ingestion lane
 - **Goal:** replace the hand-run SQL with a governed, distributed, resumable pipeline feeding real corpora.

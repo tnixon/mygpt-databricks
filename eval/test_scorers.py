@@ -139,3 +139,31 @@ def test_scorer_sets_build():
     assert {"retrieval_groundedness", "yes_no_format", "answer_label", "mygpt_trust"} <= names
     names = {sc.name for sc in s.scorers_for("bluesky", vocab=["E. coli"])}
     assert {"js_array_valid", "vocab_compliance", "kinase_in_context"} <= names
+
+
+# --- run_eval post-run helpers ---------------------------------------------- #
+import pandas as pd  # noqa: E402
+
+import run_eval  # noqa: E402
+
+
+def _persisted_row(record: dict, label: str, hi: float, grounded: str) -> dict:
+    # Endpoint traces record the root-span input as {"request": <ResponsesAgentRequest>}.
+    return {"trace_id": "t", "request": {"request": {**record["inputs"], "tool_choice": None}},
+            "answer_label/value": label, "hi_eq/value": hi, "retrieval_groundedness/value": grounded}
+
+
+def test_coding_matrix_unwraps_endpoint_request():
+    records = eval_datasets.build_records("health_policies_fr", REPO)
+    rows = pd.DataFrame([_persisted_row(records[0], "yes", 5, "yes"), _persisted_row(records[1], "no", 50, "no")])
+    m = run_eval.coding_matrix(rows, records)
+    doc = records[0]["inputs"]["custom_inputs"]["focus"]["documents"][0]
+    assert m.loc[doc, records[0]["tags"]["question_key"]] == "yes"
+    assert m.loc[doc, records[1]["tags"]["question_key"]] == "no"
+
+
+def test_hi_vs_groundedness():
+    records = eval_datasets.build_records("health_policies_fr", REPO)
+    rows = pd.DataFrame([_persisted_row(records[0], "yes", 5, "yes"), _persisted_row(records[1], "no", 50, "no")])
+    assert run_eval.hi_vs_groundedness(rows) == 1.0  # higher HI on the ungrounded row
+    assert run_eval.auroc([1, 2], [True, True]) is None
