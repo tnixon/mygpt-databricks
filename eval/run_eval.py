@@ -39,7 +39,11 @@ def served_model_id(endpoint: str) -> tuple[str | None, str | None]:
         from mlflow import MlflowClient
 
         ep = WorkspaceClient().serving_endpoints.get(endpoint)
-        ent = next(e for e in ep.config.served_entities if e.entity_version)
+        # agents.deploy keeps every prior version as a served entity (at 0% traffic) —
+        # the version under test is the one the traffic routes send requests to.
+        routes = ep.config.traffic_config.routes if ep.config.traffic_config else []
+        live = max(routes, key=lambda r: r.traffic_percentage or 0).served_entity_name if routes else None
+        ent = next(e for e in ep.config.served_entities if e.entity_version and (live is None or e.name == live))
         mv = MlflowClient(registry_uri="databricks-uc").get_model_version(ent.entity_name, ent.entity_version)
         return getattr(mv, "model_id", None), f"{ent.entity_name}/{ent.entity_version}"
     except Exception as exc:  # noqa: BLE001

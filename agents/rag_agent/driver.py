@@ -45,6 +45,9 @@ def main() -> None:
     ap.add_argument("--model-name", default="mygpt_rag_agent")
     ap.add_argument("--endpoint-name", default="mygpt-rag-agent")
     ap.add_argument("--vs-endpoint", default="mygpt-vs")
+    # Phase 2: the corpus-aware index (syncs `corpus`); created alongside the Phase-1
+    # doc_chunks_index rather than replacing it, so the swap had no retrieval downtime.
+    ap.add_argument("--vs-index-name", default="doc_chunks_corpus_index")
     # Phase 1b: the agent's own embedding calls are reached through the Unity AI Gateway
     # endpoint, not the bge-m3 model endpoint directly. agent.py reads MYGPT_EMBED_ENDPOINT.
     ap.add_argument("--embed-endpoint", default="mygpt-embeddings")
@@ -60,7 +63,7 @@ def main() -> None:
 
     here = _package_dir(args.base_dir)
     uc_model = f"{args.catalog}.{args.schema}.{args.model_name}"
-    vs_index = f"{args.catalog}.{args.schema}.doc_chunks_index"
+    vs_index = f"{args.catalog}.{args.schema}.{args.vs_index_name}"
     rf_pkl = os.path.join(here, "artifacts", "random_forest_hybrid_model_base.pkl")
 
     mlflow.set_registry_uri("databricks-uc")

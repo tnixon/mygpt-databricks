@@ -35,7 +35,7 @@ import numpy as np
 from mlflow.pyfunc import ResponsesAgent
 from mlflow.types.responses import ResponsesAgentRequest, ResponsesAgentResponse
 
-VS_INDEX = os.environ.get("MYGPT_VS_INDEX", "structural_biology.mygpt.doc_chunks_index")
+VS_INDEX = os.environ.get("MYGPT_VS_INDEX", "structural_biology.mygpt.doc_chunks_corpus_index")
 VS_ENDPOINT = os.environ.get("MYGPT_VS_ENDPOINT", "mygpt-vs")
 EMBED_ENDPOINT = os.environ.get("MYGPT_EMBED_ENDPOINT", "mygpt-bge-m3")
 CATALOG_SCHEMA = os.environ.get("MYGPT_SCHEMA", "structural_biology.mygpt")
@@ -446,9 +446,19 @@ class MyGPTRagAgent(ResponsesAgent):
             body={"messages": [{"role": "user", "content": prompt}]},
         )
         choices = resp.get("choices") or []
-        if choices:
-            return (choices[0].get("message") or {}).get("content") or ""
-        return ""
+        if not choices:
+            return ""
+        content = (choices[0].get("message") or {}).get("content") or ""
+        if isinstance(content, list):
+            # Reasoning-capable models (e.g. Claude Sonnet 5) can return content blocks —
+            # [{"type": "reasoning", "summary": [...]}, {"type": "text", "text": ...}].
+            # Keep only the answer text; passing the blocks on broke _embed (bge-m3
+            # rejects dict inputs) and leaked reasoning into the answer.
+            content = "".join(
+                part.get("text", "") for part in content
+                if isinstance(part, dict) and part.get("type") in ("text", "output_text")
+            )
+        return str(content).strip()
 
     @mlflow.trace(span_type="PARSER")
     def _score_answer(self, answer: str, sources: list[dict], question_semantic: float, cfg: DatasetConfig) -> dict:

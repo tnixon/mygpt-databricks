@@ -123,7 +123,9 @@ GROUP BY corpus, section;
 
 -- 4) Vector Search endpoint + Delta Sync index (MANAGED embeddings via the custom
 --    bge-m3 endpoint). `section` and (Phase 2) `corpus` are synced so the agent can
---    filter on them. Adding a synced column requires recreating the index. These
+--    filter on them. Adding a synced column requires a new index: Phase 2 created
+--    `doc_chunks_corpus_index` alongside the Phase-1 `doc_chunks_index` (no retrieval
+--    downtime; the agent driver points at it via --vs-index-name). These
 --    are CLI/API, not SQL. Recreate the index (embedding model + columns changed) then sync:
 --
 --    NOTE (Phase 1b): AI Search managed embeddings call the MODEL endpoint `mygpt-bge-m3`
@@ -133,9 +135,8 @@ GROUP BY corpus, section;
 --    still fronts the RAG agent's embedding calls; only Vector Search stays on the model
 --    endpoint. Revisit if the "AI Query for Custom Models and External Models" preview lands.
 --
---    databricks vector-search-indexes delete-index structural_biology.mygpt.doc_chunks_index --profile mygpt
 --    databricks vector-search-indexes create-index --profile mygpt --json '{
---      "name": "structural_biology.mygpt.doc_chunks_index",
+--      "name": "structural_biology.mygpt.doc_chunks_corpus_index",
 --      "endpoint_name": "mygpt-vs",
 --      "primary_key": "chunk_id",
 --      "index_type": "DELTA_SYNC",
@@ -149,7 +150,7 @@ GROUP BY corpus, section;
 --      }
 --    }'
 --
---    databricks vector-search-indexes sync-index structural_biology.mygpt.doc_chunks_index --profile mygpt
+--    databricks vector-search-indexes sync-index structural_biology.mygpt.doc_chunks_corpus_index --profile mygpt
 --
 -- Index-metric note: calibrate embedding_model_cutoffs (workstream C) in the SAME
 -- distance space the agent uses (distance = 1 - cosine similarity returned by the index).

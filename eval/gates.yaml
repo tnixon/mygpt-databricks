@@ -10,6 +10,8 @@ shared:
   retrieval_ok/mean: 1.0          # every row retrieved >= 1 source, no retrieve_error
   focus_adherence/mean: 1.0       # all sources come from the focused document
   retrieval_groundedness/mean: null
+  # Informational only: SJ Global asks "does the document mention X?", so when X is
+  # absent every chunk is (correctly) judged irrelevant -> ~0 by design, not a defect.
   retrieval_relevance/mean: null
   relevance_to_query/mean: null
   safety/mean: null

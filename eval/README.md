@@ -50,12 +50,16 @@ databricks bundle deploy -p mygpt --var warehouse_id=<id>
 databricks bundle run mygpt_etl -p mygpt --var warehouse_id=<id> # + recreate/sync the index (02 SQL tail)
 databricks bundle run mygpt_deploy_agent -p mygpt
 databricks bundle run mygpt_eval_build_datasets -p mygpt
-databricks bundle run mygpt_eval -p mygpt --params max_rows=5    # smoke
+databricks bundle run mygpt_eval -p mygpt --params max_rows=5    # smoke (default matrix)
 databricks bundle run mygpt_eval -p mygpt --params gate=true     # full + gates
 databricks bundle run mygpt_eval_monitor -p mygpt
 ```
-Override the matrix for the model comparison, e.g.
-`--params 'matrix=[{"dataset":"health_policies_fr","model":"gptoss"}]'`.
+`--params` is CSV-parsed, so a JSON `matrix` override must go through `jobs run-now`, e.g.
+for the model comparison:
+```bash
+databricks jobs run-now -p mygpt --json '{"job_id": <mygpt_eval job id>, "job_parameters":
+  {"matrix": "[{\"dataset\":\"health_policies_fr\",\"model\":\"gptoss\"}]"}}'
+```
 
 ## Blocked on St. Jude (BlueSky)
 - The kinase PDFs, named `<pubmed_id>.pdf` (or a `pdf_name` column in `kinase_pubmed_pairs.csv`).

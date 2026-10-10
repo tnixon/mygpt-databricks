@@ -57,10 +57,9 @@ def main() -> None:
         try:
             ds = datasets.get_dataset(name=spec.uc_table)
         except Exception:  # noqa: BLE001  (not created yet)
-            ds = datasets.create_dataset(
-                name=spec.uc_table, experiment_id=experiment_id,
-                tags={"use_case": spec.use_case, "corpus": spec.corpus, "source": "MyGPT-evaluations"},
-            )
+            # (No dataset-level tags: on Databricks they're managed through Unity Catalog;
+            # use_case / corpus / source_sha are recorded per row instead.)
+            ds = datasets.create_dataset(name=spec.uc_table, experiment_id=experiment_id)
         ds = ds.merge_records(records)
         print(f"{spec.uc_table}: merged {len(records)} records (corpus={spec.corpus})")
 
