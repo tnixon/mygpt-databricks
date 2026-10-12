@@ -35,7 +35,7 @@ import numpy as np
 from mlflow.pyfunc import ResponsesAgent
 from mlflow.types.responses import ResponsesAgentRequest, ResponsesAgentResponse
 
-VS_INDEX = os.environ.get("MYGPT_VS_INDEX", "structural_biology.mygpt.doc_chunks_index")
+VS_INDEX = os.environ.get("MYGPT_VS_INDEX", "structural_biology.mygpt.doc_chunks_corpus_index")
 VS_ENDPOINT = os.environ.get("MYGPT_VS_ENDPOINT", "mygpt-vs")
 EMBED_ENDPOINT = os.environ.get("MYGPT_EMBED_ENDPOINT", "mygpt-bge-m3")
 CATALOG_SCHEMA = os.environ.get("MYGPT_SCHEMA", "structural_biology.mygpt")
@@ -220,11 +220,21 @@ class DatasetConfig:
     reranker_cutoff: float
 
 
+# Per-corpus deviations from the packaged defaults (mirror of config.py / the
+# dataset_config CSV) so they apply even without MYGPT_WAREHOUSE_ID.
+_PACKAGED_OVERRIDES = {
+    "health_policies_fr": {"use_reranker": False, "documents_language": "french"},
+    "health_policies_es": {"use_reranker": False, "documents_language": "spanish"},
+}
+
+
 def _config_fallback(dataset_name: str) -> DatasetConfig:
+    ov = _PACKAGED_OVERRIDES.get(dataset_name, {})
     return DatasetConfig(
         dataset_name=dataset_name, embedding_model="bge-m3",
-        reranker="cross-encoder/qnli-electra-base", use_bm25=True, use_reranker=True,
-        documents_language="english", hi_by_equation=True,
+        reranker="cross-encoder/qnli-electra-base", use_bm25=True,
+        use_reranker=ov.get("use_reranker", True),
+        documents_language=ov.get("documents_language", "english"), hi_by_equation=True,
         scoring=ScoringConfig(), cutoffs=_DEFAULT_CUTOFFS, reranker_cutoff=0.10,
     )
 
@@ -319,9 +329,30 @@ class MyGPTRagAgent(ResponsesAgent):
         )
         return _parse_embeddings(resp, n=len(texts))
 
-    @mlflow.trace(span_type="RETRIEVER")
-    def _retrieve(self, query: str, cfg: DatasetConfig, focus: dict, k: int) -> list[dict]:
+    def _retrieve_traced(self, query: str, corpus: str | None, focus: dict, k: int) -> list[dict]:
+        """Run retrieval inside a RETRIEVER span whose outputs use MLflow's Document
+        shape (page_content + metadata.doc_uri), so built-in judges
+        (RetrievalGroundedness / RetrievalRelevance) can read the retrieved context off
+        the trace. Returns the raw source dicts the scoring pipeline works on."""
+        with mlflow.start_span(name="retrieve", span_type="RETRIEVER") as span:
+            span.set_inputs({"query": query, "corpus": corpus, "focus": focus, "k": k})
+            sources = self._retrieve(query, corpus, focus, k)
+            span.set_outputs([
+                {
+                    "page_content": s["context"],
+                    "metadata": {
+                        "doc_uri": s["source_name"], "chunk_id": s["chunk_id"], "corpus": s["corpus"],
+                        "section": s["section"], "page": s["page"], "similarity": s["similarity"],
+                    },
+                }
+                for s in sources
+            ])
+        return sources
+
+    def _retrieve(self, query: str, corpus: str | None, focus: dict, k: int) -> list[dict]:
         filters: dict[str, Any] = {}
+        if corpus:
+            filters["corpus"] = corpus
         docs = focus.get("documents") or []
         section = focus.get("section")
         if docs:
@@ -329,7 +360,7 @@ class MyGPTRagAgent(ResponsesAgent):
         if section and section != "all":
             filters["section"] = section
         payload: dict[str, Any] = {
-            "columns": ["chunk_id", "source_name", "section", "page", "chunk_text"],
+            "columns": ["chunk_id", "source_name", "corpus", "section", "page", "chunk_text"],
             "query_text": query,
             "num_results": k,
             "query_type": "HYBRID",
@@ -357,7 +388,7 @@ class MyGPTRagAgent(ResponsesAgent):
             sim = float(r.get("score", 0.0))
             sources.append({
                 "chunk_id": r.get("chunk_id"), "source_name": r.get("source_name") or "",
-                "section": r.get("section") or "", "page": None if r.get("page") is None else int(r["page"]),
+                "corpus": r.get("corpus") or "", "section": r.get("section") or "", "page": None if r.get("page") is None else int(r["page"]),
                 "context": str(r.get("chunk_text") or ""), "similarity": sim,
                 "vector_distance_raw": round(1.0 - sim, 4), "bm25_score": round(sim, 4), "rank": rank,
             })
@@ -392,7 +423,7 @@ class MyGPTRagAgent(ResponsesAgent):
         return qrs, semantic, sources
 
     @mlflow.trace(span_type="LLM")
-    def _generate(self, query: str, sources: list[dict], model_alias: str) -> str:
+    def _generate(self, query: str, sources: list[dict], model_alias: str, instructions: str = "") -> str:
         context = "\n\n".join(
             f"[{i + 1}] {s['source_name']} (p{s['page'] if s['page'] is not None else '?'}):\n{s['context']}"
             for i, s in enumerate(sources)
@@ -403,6 +434,10 @@ class MyGPTRagAgent(ResponsesAgent):
             "do not contain the answer, say you couldn't find it in the documents.\n\n"
             f"Sources:\n{context}\n\nQuestion: {query}"
         )
+        if instructions:
+            # Per-request answer-format instructions (e.g. the MyGPT-evaluations kinase
+            # JS-array formats), appended so the grounding rules above still apply.
+            prompt += f"\n\nAnswer format instructions: {instructions}"
         endpoint = MODEL_ALIASES.get(model_alias, MODEL_ALIASES["sonnet"])
         # Chat via the serving endpoint's injected credentials (REST), same as
         # retrieval/embeddings — avoids the databricks-sdk[openai] dependency.
@@ -411,9 +446,19 @@ class MyGPTRagAgent(ResponsesAgent):
             body={"messages": [{"role": "user", "content": prompt}]},
         )
         choices = resp.get("choices") or []
-        if choices:
-            return (choices[0].get("message") or {}).get("content") or ""
-        return ""
+        if not choices:
+            return ""
+        content = (choices[0].get("message") or {}).get("content") or ""
+        if isinstance(content, list):
+            # Reasoning-capable models (e.g. Claude Sonnet 5) can return content blocks —
+            # [{"type": "reasoning", "summary": [...]}, {"type": "text", "text": ...}].
+            # Keep only the answer text; passing the blocks on broke _embed (bge-m3
+            # rejects dict inputs) and leaked reasoning into the answer.
+            content = "".join(
+                part.get("text", "") for part in content
+                if isinstance(part, dict) and part.get("type") in ("text", "output_text")
+            )
+        return str(content).strip()
 
     @mlflow.trace(span_type="PARSER")
     def _score_answer(self, answer: str, sources: list[dict], question_semantic: float, cfg: DatasetConfig) -> dict:
@@ -441,27 +486,40 @@ class MyGPTRagAgent(ResponsesAgent):
 
     def predict(self, request: ResponsesAgentRequest) -> ResponsesAgentResponse:
         ci = request.custom_inputs or {}
-        dataset = ci.get("dataset", "mygpt")
+        # corpus (optional) isolates retrieval to one top-level volume folder; absent =
+        # search every corpus (the app's default). Config defaults to the corpus' row.
+        corpus = ci.get("corpus") or None
+        dataset = ci.get("dataset") or corpus or "mygpt"
         model_alias = ci.get("model", "sonnet")
         focus = ci.get("focus", {}) or {}
         k = int(ci.get("k", 5))
+        instructions = str(ci.get("instructions") or "")
         query = _last_user_text(request)
         cfg = self._config(dataset)
+        model_endpoint = MODEL_ALIASES.get(model_alias, MODEL_ALIASES["sonnet"])
+        try:
+            # Tags let eval runs and production monitoring slice traces per corpus/model.
+            mlflow.update_current_trace(tags={
+                "mygpt.corpus": corpus or "all", "mygpt.dataset": dataset, "mygpt.model": model_endpoint,
+            })
+        except Exception:  # noqa: BLE001  (no active trace, e.g. tracing disabled)
+            pass
 
-        sources = self._retrieve(query, cfg, focus, k)
+        sources = self._retrieve_traced(query, corpus, focus, k)
         if not sources:
             item = self.create_text_output_item(
                 "I couldn't find anything relevant in the indexed documents.", str(uuid.uuid4())
             )
             return ResponsesAgentResponse(output=[item], custom_outputs={
-                "qrs": 0, "ars": 0, "hi_eq": 100, "sources": [],
+                "model": model_endpoint, "corpus": corpus,
+                "qrs": 0, "ars": 0, "hi_eq": 100, "hi_rf": None, "sources": [],
                 # Surface the caught retrieval error instead of silently returning [].
                 "retrieve_error": getattr(self, "_last_retrieve_error", None),
             })
 
         sources = self._rerank(query, sources, cfg)
         qrs, question_semantic, sources = self._score_question(sources, cfg)
-        answer = self._generate(query, sources, model_alias)
+        answer = self._generate(query, sources, model_alias, instructions)
         ans = self._score_answer(answer, sources, question_semantic, cfg)
         for s, label in zip(sources, ans["nli"]):
             s["nli"] = label
@@ -470,11 +528,11 @@ class MyGPTRagAgent(ResponsesAgent):
         return ResponsesAgentResponse(
             output=[item],
             custom_outputs={
-                "model": MODEL_ALIASES.get(model_alias, MODEL_ALIASES["sonnet"]),
+                "model": model_endpoint, "corpus": corpus,
                 "qrs": qrs, "ars": ans["ars"], "hi_eq": ans["hi_eq"], "hi_rf": ans["hi_rf"],
                 "sources": [
                     {
-                        "source_name": s["source_name"], "section": s["section"], "page": s["page"],
+                        "source_name": s["source_name"], "corpus": s["corpus"], "section": s["section"], "page": s["page"],
                         "snippet": s["context"][:240], "vector_score": s.get("vector_score"),
                         "bm25_score": s.get("bm25_score"), "rerank_score": s.get("rerank_score"), "nli": s.get("nli"),
                     }

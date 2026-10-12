@@ -37,14 +37,24 @@ class DatasetConfig:
     reranker_cutoff: float
 
 
+# Per-corpus deviations from the packaged defaults (mirror of etl/config/dataset_config.csv)
+# so the endpoint applies them even without a warehouse: the FR/ES policy corpora skip
+# the English-only QNLI reranker (and NLI, via documents_language).
+_PACKAGED_OVERRIDES = {
+    "health_policies_fr": {"use_reranker": False, "documents_language": "french"},
+    "health_policies_es": {"use_reranker": False, "documents_language": "spanish"},
+}
+
+
 def _fallback(dataset_name: str) -> DatasetConfig:
+    ov = _PACKAGED_OVERRIDES.get(dataset_name, {})
     return DatasetConfig(
         dataset_name=dataset_name,
         embedding_model="bge-m3",
         reranker="cross-encoder/qnli-electra-base",
         use_bm25=True,
-        use_reranker=True,
-        documents_language="english",
+        use_reranker=ov.get("use_reranker", True),
+        documents_language=ov.get("documents_language", "english"),
         hi_by_equation=True,
         scoring=ScoringConfig(),
         cutoffs=_DEFAULT_CUTOFFS,

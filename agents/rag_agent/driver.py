@@ -45,25 +45,30 @@ def main() -> None:
     ap.add_argument("--model-name", default="mygpt_rag_agent")
     ap.add_argument("--endpoint-name", default="mygpt-rag-agent")
     ap.add_argument("--vs-endpoint", default="mygpt-vs")
+    # Phase 2: the corpus-aware index (syncs `corpus`); created alongside the Phase-1
+    # doc_chunks_index rather than replacing it, so the swap had no retrieval downtime.
+    ap.add_argument("--vs-index-name", default="doc_chunks_corpus_index")
     # Phase 1b: the agent's own embedding calls are reached through the Unity AI Gateway
     # endpoint, not the bge-m3 model endpoint directly. agent.py reads MYGPT_EMBED_ENDPOINT.
     ap.add_argument("--embed-endpoint", default="mygpt-embeddings")
     # The Vector Search index's managed-embedding model, invoked at query time with the
     # agent's identity — declared as a resource so retrieval has CAN QUERY on it.
     ap.add_argument("--vs-embed-endpoint", default="mygpt-bge-m3")
+    # Phase 2: one shared experiment holds the LoggedModels, the eval runs (eval/), and
+    # the endpoint's production traces (pinned via MLFLOW_EXPERIMENT_ID below).
+    # Declared as a DABs resource in databricks.yml.
+    ap.add_argument("--experiment", default="/Shared/mygpt/mygpt-rag-agent")
     ap.add_argument("--base-dir", default="")
     args = ap.parse_args()
 
     here = _package_dir(args.base_dir)
     uc_model = f"{args.catalog}.{args.schema}.{args.model_name}"
-    vs_index = f"{args.catalog}.{args.schema}.doc_chunks_index"
+    vs_index = f"{args.catalog}.{args.schema}.{args.vs_index_name}"
     rf_pkl = os.path.join(here, "artifacts", "random_forest_hybrid_model_base.pkl")
 
     mlflow.set_registry_uri("databricks-uc")
-    # Serverless jobs have no default experiment — set one under the runner's home.
-    from databricks.sdk import WorkspaceClient
-
-    mlflow.set_experiment(f"/Users/{WorkspaceClient().current_user.me().user_name}/mygpt_phase1")
+    # Serverless jobs have no default experiment — use the shared, bundle-managed one.
+    experiment_id = mlflow.set_experiment(args.experiment).experiment_id
 
     # Resources the serving endpoint must reach (auth provisioned by Agent Framework).
     # NOTE: two embedding endpoints are declared on purpose:
@@ -94,7 +99,7 @@ def main() -> None:
         )
 
     registered = mlflow.register_model(model_uri=logged.model_uri, name=uc_model)
-    print(f"Registered {uc_model} v{registered.version}")
+    print(f"Registered {uc_model} v{registered.version} (LoggedModel {logged.model_id})")
 
     # Deploy via Mosaic AI Agent Framework (creates/updates the serving endpoint).
     from databricks import agents
@@ -109,6 +114,11 @@ def main() -> None:
             "MYGPT_VS_ENDPOINT": args.vs_endpoint,
             "MYGPT_EMBED_ENDPOINT": args.embed_endpoint,
             "MYGPT_RF_MODEL_PATH": "/model/artifacts/rf_model/random_forest_hybrid_model_base.pkl",
+            # Pin production traces to the shared experiment explicitly: agents.deploy
+            # otherwise keeps the experiment already attached to an existing endpoint
+            # (here the Phase-1 /Users/<me>/mygpt_phase1), which would starve the
+            # monitoring scorers registered on /Shared/mygpt/mygpt-rag-agent.
+            "MLFLOW_EXPERIMENT_ID": experiment_id,
             # Set MYGPT_WAREHOUSE_ID to read live config from Delta; omit for packaged defaults.
         },
         scale_to_zero_enabled=True,

@@ -14,6 +14,9 @@
 #   databricks bundle run mygpt_deploy_embedding -p mygpt
 #   databricks bundle run mygpt_deploy_gateway -p mygpt   # AI Gateway (needs secret, below)
 #   databricks bundle run mygpt_deploy_agent -p mygpt
+#   databricks bundle run mygpt_eval_build_datasets -p mygpt   # Phase 2: UC eval datasets
+#   databricks bundle run mygpt_eval -p mygpt                  # Phase 2: eval runs (+ gates)
+#   databricks bundle run mygpt_eval_monitor -p mygpt          # Phase 2: production monitoring
 #
 # NOTE 1: the Vector Search index (re)creation remains an API step (see the tail of
 # etl/sql/02_parse_chunk_index.sql) because it must point the Delta Sync index at
@@ -25,6 +28,12 @@
 bundle:
   name: st-jude-mygpt-platform
 
+# The eval jobs read St. Jude's MyGPT-evaluations CSVs from the synced submodule; the
+# eval-corpus PDFs go to the docs volume instead (`make eval-corpus`), so skip them here.
+sync:
+  exclude:
+    - "reference/**/*.pdf"
+
 variables:
   warehouse_id:
     description: SQL warehouse that runs the ETL SQL (serverless recommended).
@@ -35,6 +44,14 @@ variables:
     default: mygpt
 
 resources:
+  experiments:
+    # Phase 2: ONE shared experiment for the agent lifecycle — LoggedModels (driver.py),
+    # offline eval runs (eval/run_eval.py), and the endpoint's production traces +
+    # monitoring scorers (eval/monitor.py). The /Shared/mygpt folder must exist:
+    #   databricks workspace mkdirs /Shared/mygpt -p mygpt
+    mygpt_rag_agent:
+      name: /Shared/mygpt/mygpt-rag-agent
+
   jobs:
     mygpt_etl:
       name: "[mygpt] ETL — parse, section-chunk, index config"
@@ -103,7 +120,8 @@ resources:
           spark_python_task:
             python_file: agents/rag_agent/driver.py
             parameters:
-              ["--catalog", "${var.catalog}", "--schema", "${var.schema}", "--base-dir", "${workspace.file_path}"]
+              ["--catalog", "${var.catalog}", "--schema", "${var.schema}", "--base-dir", "${workspace.file_path}",
+               "--experiment", "${resources.experiments.mygpt_rag_agent.name}"]
       environments:
         - environment_key: default
           spec:
@@ -117,6 +135,75 @@ resources:
               - sentence-transformers>=3.0.0
               - torch>=2.3
               - scikit-learn>=1.5
+
+    # ---------------------------------------------------------------- Phase 2: eval
+    mygpt_eval_build_datasets:
+      name: "[mygpt] Eval — build UC eval datasets (MyGPT-evaluations)"
+      tasks:
+        - task_key: build_datasets
+          environment_key: eval
+          spark_python_task:
+            python_file: eval/build_datasets.py
+            parameters:
+              ["--catalog", "${var.catalog}", "--schema", "${var.schema}", "--base-dir", "${workspace.file_path}",
+               "--experiment", "${resources.experiments.mygpt_rag_agent.name}",
+               "--datasets", "{{job.parameters.datasets}}"]
+      parameters:
+        - name: datasets
+          default: "health_policies_fr,health_policies_es,kinase_literature"
+      environments:
+        - environment_key: eval
+          spec:
+            client: "1"
+            dependencies: ["mlflow[databricks]>=3.4", "databricks-agents", "databricks-sdk>=0.40", "pyyaml"]
+
+    mygpt_eval:
+      name: "[mygpt] Eval — mlflow.genai.evaluate over dataset x model (+ gates)"
+      parameters:
+        # One run per {dataset, model}. kinase_literature joins once St. Jude's PDFs are
+        # indexed; add llama / gptoss entries for the model comparison baseline.
+        - name: matrix
+          default: '[{"dataset": "health_policies_fr", "model": "sonnet"}, {"dataset": "health_policies_es", "model": "sonnet"}]'
+        - name: max_rows
+          default: "0"
+        - name: gate
+          default: "false"
+      tasks:
+        - task_key: eval
+          for_each_task:
+            inputs: "{{job.parameters.matrix}}"
+            # one dataset at a time: the agent endpoint (CPU Small) is the bottleneck
+            concurrency: 1
+            task:
+              task_key: eval_one
+              environment_key: eval
+              spark_python_task:
+                python_file: eval/run_eval.py
+                parameters:
+                  ["--dataset", "{{input.dataset}}", "--model", "{{input.model}}",
+                   "--catalog", "${var.catalog}", "--schema", "${var.schema}", "--base-dir", "${workspace.file_path}",
+                   "--experiment", "${resources.experiments.mygpt_rag_agent.name}",
+                   "--max-rows", "{{job.parameters.max_rows}}", "--gate", "{{job.parameters.gate}}"]
+      environments:
+        - environment_key: eval
+          spec:
+            client: "1"
+            dependencies: ["mlflow[databricks]>=3.4", "databricks-agents", "databricks-sdk>=0.40", "pyyaml"]
+
+    mygpt_eval_monitor:
+      name: "[mygpt] Eval — register production-monitoring scorers"
+      tasks:
+        - task_key: monitor
+          environment_key: eval
+          spark_python_task:
+            python_file: eval/monitor.py
+            parameters:
+              ["--base-dir", "${workspace.file_path}", "--experiment", "${resources.experiments.mygpt_rag_agent.name}"]
+      environments:
+        - environment_key: eval
+          spec:
+            client: "1"
+            dependencies: ["mlflow[databricks]>=3.4", "databricks-agents", "databricks-sdk>=0.40", "pyyaml"]
 
 targets:
   default:

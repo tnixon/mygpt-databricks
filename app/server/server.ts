@@ -86,7 +86,7 @@ createApp({
             raw: false,
             payload: {
               warehouse_id: WAREHOUSE_ID,
-              statement: `SELECT section_title, section_count FROM ${SCHEMA}.paper_sections ORDER BY section_count DESC LIMIT 200`,
+              statement: `SELECT section_title, section_count FROM ${SCHEMA}.paper_sections WHERE dataset_name = 'mygpt' ORDER BY section_count DESC LIMIT 200`,
               wait_timeout: '30s',
             },
           });

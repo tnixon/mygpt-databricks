@@ -7,10 +7,25 @@
 -- are inlined here as VALUES so the ETL job is self-contained (no volume/CSV read
 -- step). Edit both when tuning, or point a later job at the CSVs if preferred.
 
--- Per-dataset coefficients + retrieval settings (one row per library).
+-- Per-dataset coefficients + retrieval settings (one row per library / corpus).
+-- Phase 2 adds one row per eval corpus (dataset_name = corpus). The FR/ES policy
+-- corpora run without the reranker: qnli-electra-base is English-only, matching
+-- MyGPT's `global-french-bge-no-rerank` library; NLI is skipped for non-English too.
 CREATE OR REPLACE TABLE structural_biology.mygpt.dataset_config AS
 SELECT * FROM VALUES
   ('mygpt', 'bge-m3', 'structure_preserving', 1000, false, true, true,
+   'cross-encoder/qnli-electra-base', 'english', 'cosine',
+   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true),
+  ('biomed', 'bge-m3', 'structure_preserving', 1000, false, true, true,
+   'cross-encoder/qnli-electra-base', 'english', 'cosine',
+   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true),
+  ('health_policies_fr', 'bge-m3', 'structure_preserving', 1000, false, true, false,
+   'cross-encoder/qnli-electra-base', 'french', 'cosine',
+   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true),
+  ('health_policies_es', 'bge-m3', 'structure_preserving', 1000, false, true, false,
+   'cross-encoder/qnli-electra-base', 'spanish', 'cosine',
+   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true),
+  ('kinase_literature', 'bge-m3', 'structure_preserving', 1000, false, true, true,
    'cross-encoder/qnli-electra-base', 'english', 'cosine',
    4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true)
 AS t(dataset_name, embedding_model, chunking_method, chunksize, overlap, use_bm25, use_reranker,

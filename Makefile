@@ -9,9 +9,14 @@
 PROFILE ?= stjude-mygpt
 APP_DIR := app
 
+# Phase-2 eval corpora: one docs-volume folder per corpus (= the agent's custom_inputs.corpus).
+DOCS_VOLUME := dbfs:/Volumes/structural_biology/mygpt/docs
+EVAL_INPUTS := reference/MyGPT-evaluations
+KINASE_PDFS ?=   # dir of St. Jude's kinase PDFs, named <pubmed_id>.pdf (not in the submodule)
+
 .DEFAULT_GOAL := help
 
-.PHONY: help init submodules submodules-update install dev build typecheck lint test validate deploy clean
+.PHONY: help init submodules submodules-update install dev build typecheck lint test validate deploy clean eval-corpus eval-test
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -51,3 +56,13 @@ deploy: ## Deploy the app to the workspace (PROFILE=<name>)
 
 clean: ## Remove app build artifacts + node_modules
 	cd $(APP_DIR) && pnpm run clean
+
+eval-corpus: ## Upload the Phase-2 eval corpora to the docs volume (PROFILE=<name>, KINASE_PDFS=<dir>)
+	databricks fs cp -r --overwrite "$(EVAL_INPUTS)/health_policies/inputs/French_10_pdfs" $(DOCS_VOLUME)/health_policies_fr --profile $(PROFILE)
+	databricks fs cp -r --overwrite "$(EVAL_INPUTS)/health_policies/inputs/Spanish_10_pdfs" $(DOCS_VOLUME)/health_policies_es --profile $(PROFILE)
+	@if [ -n "$(KINASE_PDFS)" ]; then \
+	  databricks fs cp -r --overwrite "$(KINASE_PDFS)" $(DOCS_VOLUME)/kinase_literature --profile $(PROFILE); \
+	else echo "KINASE_PDFS not set — skipping kinase_literature (St. Jude to provide the PDFs)"; fi
+
+eval-test: ## Unit-test the eval harness + agent scoring math (no workspace needed)
+	uv run --no-project --with-requirements eval/requirements.txt pytest -q eval/ agents/rag_agent/test_scoring.py

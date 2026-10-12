@@ -7,6 +7,8 @@
 --   * merges the fine-grained ai_parse_document elements into ~1000-char,
 --     section-bounded chunks (MyGPT chunksize=1000, overlap=false);
 --   * re-embeds via the custom `mygpt-bge-m3` Model Serving endpoint (gap 1).
+-- Phase 2: carries `corpus` (from 01) through to the chunks + index so the agent can
+--   isolate retrieval per corpus (eval corpora vs. the biomed seed).
 -- This file is run as a task of the DABs ETL job (see databricks.yml).
 
 -- 1) Parse each FILE and explode into document elements, tagging section headers.
@@ -14,14 +16,14 @@
 CREATE OR REPLACE TABLE structural_biology.mygpt.doc_elements
 TBLPROPERTIES (delta.enableChangeDataFeed = true) AS
 WITH parsed AS (
-  SELECT id AS doc_id, path, ai_parse_document(file) AS d
+  SELECT id AS doc_id, path, corpus, ai_parse_document(file) AS d
   FROM structural_biology.mygpt.documents
   WHERE content_type = 'application/pdf'
-  -- seed scope; drop the LIKE to include everything (e.g. multilingual policy docs)
-  AND path LIKE '%/biomed/%'
+  -- corpus allow-list (one top-level volume folder each); add new corpora here
+  AND corpus IN ('biomed', 'health_policies_fr', 'health_policies_es', 'kinase_literature')
 ),
 elems AS (
-  SELECT doc_id, path, idx, e
+  SELECT doc_id, path, corpus, idx, e
   FROM parsed
   LATERAL VIEW posexplode(from_json(to_json(d:document.elements), 'array<variant>')) t AS idx, e
 ),
@@ -29,6 +31,7 @@ tagged AS (
   SELECT
     doc_id,
     path,
+    corpus,
     idx,
     e:type::string                        AS elem_type,
     try_cast(e:bbox[0]:page_id AS INT)    AS page,
@@ -41,7 +44,7 @@ tagged AS (
 ),
 sectioned AS (
   SELECT
-    doc_id, path, idx, elem_type, page, content, header_text,
+    doc_id, path, corpus, idx, elem_type, page, content, header_text,
     -- running section = most recent header seen in document order
     coalesce(
       last_value(header_text) IGNORE NULLS
@@ -59,7 +62,7 @@ TBLPROPERTIES (delta.enableChangeDataFeed = true) AS
 WITH body AS (
   -- keep substantive body text; drop headers themselves and tiny noise
   SELECT
-    doc_id, path, idx, page, section, content,
+    doc_id, path, corpus, idx, page, section, content,
     regexp_extract(path, '([^/]+)$', 1) AS source_name
   FROM structural_biology.mygpt.doc_elements
   WHERE length(content) >= 80
@@ -67,7 +70,7 @@ WITH body AS (
 ),
 bucketed AS (
   SELECT
-    doc_id, path, source_name, idx, page, section, content,
+    doc_id, path, corpus, source_name, idx, page, section, content,
     -- running char length within (doc, section) -> fixed ~1000-char buckets
     cast(floor(
       (sum(length(content) + 1)
@@ -81,6 +84,7 @@ chunks AS (
     doc_id,
     any_value(path)                                   AS path,
     any_value(source_name)                            AS source_name,
+    any_value(corpus)                                 AS corpus,
     section,
     bucket,
     min(idx)                                          AS first_idx,
@@ -96,6 +100,7 @@ SELECT
   doc_id,
   path,
   source_name,
+  corpus,
   section,
   page,
   'section_chunk'                                                AS elem_type,
@@ -105,16 +110,22 @@ WHERE length(chunk_text) >= 80;
 
 -- 3) Per-dataset section catalogue (port of MyGPT PaperSections) — powers the
 --    document/section focus selector and the agent's section validation.
+--    'mygpt' (the app's default, unfiltered view) spans every corpus; each corpus
+--    also gets its own rows so per-corpus focus selectors can list just its sections.
 CREATE OR REPLACE TABLE structural_biology.mygpt.paper_sections AS
-SELECT
-  'mygpt'            AS dataset_name,
-  section            AS section_title,
-  count(*)           AS section_count
+SELECT 'mygpt' AS dataset_name, section AS section_title, count(*) AS section_count
 FROM structural_biology.mygpt.doc_chunks
-GROUP BY section;
+GROUP BY section
+UNION ALL
+SELECT corpus AS dataset_name, section AS section_title, count(*) AS section_count
+FROM structural_biology.mygpt.doc_chunks
+GROUP BY corpus, section;
 
 -- 4) Vector Search endpoint + Delta Sync index (MANAGED embeddings via the custom
---    bge-m3 endpoint). `section` is now synced so the agent can filter on it. These
+--    bge-m3 endpoint). `section` and (Phase 2) `corpus` are synced so the agent can
+--    filter on them. Adding a synced column requires a new index: Phase 2 created
+--    `doc_chunks_corpus_index` alongside the Phase-1 `doc_chunks_index` (no retrieval
+--    downtime; the agent driver points at it via --vs-index-name). These
 --    are CLI/API, not SQL. Recreate the index (embedding model + columns changed) then sync:
 --
 --    NOTE (Phase 1b): AI Search managed embeddings call the MODEL endpoint `mygpt-bge-m3`
@@ -124,9 +135,8 @@ GROUP BY section;
 --    still fronts the RAG agent's embedding calls; only Vector Search stays on the model
 --    endpoint. Revisit if the "AI Query for Custom Models and External Models" preview lands.
 --
---    databricks vector-search-indexes delete-index structural_biology.mygpt.doc_chunks_index --profile mygpt
 --    databricks vector-search-indexes create-index --profile mygpt --json '{
---      "name": "structural_biology.mygpt.doc_chunks_index",
+--      "name": "structural_biology.mygpt.doc_chunks_corpus_index",
 --      "endpoint_name": "mygpt-vs",
 --      "primary_key": "chunk_id",
 --      "index_type": "DELTA_SYNC",
@@ -136,11 +146,11 @@ GROUP BY section;
 --        "embedding_source_columns": [
 --          {"name": "chunk_text", "embedding_model_endpoint_name": "mygpt-bge-m3"}
 --        ],
---        "columns_to_sync": ["chunk_id","doc_id","source_name","section","page","elem_type","chunk_text"]
+--        "columns_to_sync": ["chunk_id","doc_id","source_name","corpus","section","page","elem_type","chunk_text"]
 --      }
 --    }'
 --
---    databricks vector-search-indexes sync-index structural_biology.mygpt.doc_chunks_index --profile mygpt
+--    databricks vector-search-indexes sync-index structural_biology.mygpt.doc_chunks_corpus_index --profile mygpt
 --
 -- Index-metric note: calibrate embedding_model_cutoffs (workstream C) in the SAME
 -- distance space the agent uses (distance = 1 - cosine similarity returned by the index).
