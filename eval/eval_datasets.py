@@ -132,10 +132,10 @@ _KINASE_GUIDELINES = {
     "16v2": ["The response is only a JavaScript array of assay method names, or 'no match' / 'no answer'."],
     "17": ["The response is only a JavaScript array of figure / table references, or 'no match' / 'no answer'."],
 }
-_KINASE_COMMON_GUIDELINE = (
-    "If the retrieved paper does not mention the kinase (or one of its synonyms), the response is "
-    "'no match' rather than an extracted value."
-)
+# Not a per-row guideline: "if the paper doesn't mention the kinase, answer 'no match'" can't
+# be judged by ExpectationsGuidelines, which sees only the question + answer, not the paper
+# (it failed 176/282 rows on that clause alone in the first baseline). The code scorer
+# `no_match_consistent` checks it against the retrieved chunks instead.
 
 
 def kinase_synonyms(base_dir: str) -> dict[str, str]:
@@ -173,7 +173,7 @@ def kinase_records(base_dir: str, source_sha: str = "", vocab: list[str] | None 
             records.append({
                 "inputs": _request(text, "kinase_literature", document,
                                    _KINASE_INSTRUCTIONS[qid].format(vocab=vocab_text)),
-                "expectations": {"guidelines": _KINASE_GUIDELINES[qid] + [_KINASE_COMMON_GUIDELINE]},
+                "expectations": {"guidelines": _KINASE_GUIDELINES[qid]},
                 "tags": {
                     "use_case": "bluesky", "corpus": "kinase_literature", "document": document,
                     "pubmed_id": pmid, "doi": pair.get("doi", ""), "kinase": kinase, "question_id": qid,

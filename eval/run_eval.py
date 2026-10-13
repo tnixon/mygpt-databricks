@@ -1,8 +1,8 @@
 """Run one Phase-2 evaluation: a UC eval dataset x an LLM alias against mygpt-rag-agent.
 
 DABs job: mygpt_eval (one for_each iteration per dataset x model). Each run:
-  * calls the live agent endpoint via mlflow.genai.to_predict_fn — the endpoint
-    returns its full trace (RETRIEVER span included), which the judges read;
+  * calls the live agent endpoint, which returns its full trace (RETRIEVER span
+    included); the trace is copied into the eval run for the judges to read;
   * scores with the use case's scorer set (eval/scorers.py);
   * links the run to the served agent's LoggedModel (model_id), so results line up
     against model versions in the shared experiment;
@@ -51,19 +51,70 @@ def served_model_id(endpoint: str) -> tuple[str | None, str | None]:
         return None, None
 
 
-def persisted_results(run_id: str):
+def persisted_results(run_id: str, require: tuple[str, ...] = (), timeout_s: int = 300):
     """Per-row results as persisted on the run's traces ([trace_id, request, <name>/value, ...]).
     Used for the post-run metrics instead of EvaluationResult.result_df, which can be
-    missing assessments that are still being logged when evaluate() returns."""
+    missing assessments that are still being logged when evaluate() returns.
+
+    Assessments are persisted asynchronously, so poll until every row has a value for each
+    `require`d assessment (or the timeout passes — then return what's there)."""
+    import time
+
     import mlflow
     import pandas as pd
     from mlflow.genai.utils.trace_utils import _get_assessment_values
 
-    df = mlflow.search_traces(run_id=run_id, return_type="pandas")
-    if df is None or df.empty:
-        return None
-    values = df["assessments"].apply(lambda a: _get_assessment_values(a, run_id)).apply(pd.Series)
-    return pd.concat([df[["trace_id", "request"]], values], axis=1)
+    deadline = time.time() + timeout_s
+    while True:
+        df = mlflow.search_traces(run_id=run_id, return_type="pandas")
+        if df is None or df.empty:
+            rows = None
+        else:
+            values = df["assessments"].apply(lambda a: _get_assessment_values(a, run_id)).apply(pd.Series)
+            rows = pd.concat([df[["trace_id", "request"]], values], axis=1)
+        complete = rows is not None and all(
+            f"{name}/value" in rows and rows[f"{name}/value"].notna().all() for name in require
+        )
+        if complete or time.time() > deadline:
+            return rows
+        time.sleep(15)
+
+
+def endpoint_predict_fn(endpoint: str, model_alias: str):
+    """predict_fn for the agent endpoint that ALWAYS copies the endpoint's returned trace
+    into the eval run.
+
+    mlflow.genai.to_predict_fn skips the copy when the endpoint already dual-writes its
+    traces to the current experiment (our setup: the agent's MLFLOW_EXPERIMENT_ID is the
+    shared experiment) and then never hands that trace to evaluate(), which falls back to
+    a root-only trace with no RETRIEVER span (RetrievalGroundedness / RetrievalRelevance
+    then fail with "No retrieval context found"). This mirrors to_predict_fn's copy branch.
+    """
+    from mlflow.deployments import get_deploy_client
+    from mlflow.tracing.constant import DATABRICKS_OPTIONS_KEY, DATABRICKS_OUTPUT_KEY, RETURN_TRACE_OPTION_KEY
+    from mlflow.tracing.utils.copy import copy_trace_to_experiment
+
+    client = get_deploy_client("databricks")
+
+    def predict_fn(input, custom_inputs=None):  # noqa: A002  (mirrors the agent request keys)
+        # Dataset rows are model-agnostic; the LLM under test is chosen per run.
+        payload = {
+            "input": input,
+            "custom_inputs": {**(custom_inputs or {}), "model": model_alias},
+            DATABRICKS_OPTIONS_KEY: {RETURN_TRACE_OPTION_KEY: True},
+        }
+        result = client.predict(endpoint=endpoint, inputs=payload)
+        trace = (result.pop(DATABRICKS_OUTPUT_KEY, None) or {}).get("trace")
+        if trace:
+            try:
+                copy_trace_to_experiment(trace)
+            except Exception as exc:  # noqa: BLE001
+                # evaluate()'s up-front trace check runs predict_fn with no-op spans, where
+                # the copy can't record — as in to_predict_fn, never fail the prediction.
+                print(f"[run_eval] could not copy endpoint trace: {type(exc).__name__}: {exc}")
+        return result
+
+    return predict_fn
 
 
 def _request_of(row) -> dict:
@@ -173,11 +224,7 @@ def main() -> None:
     if args.max_rows:
         data = data.to_df()[["inputs", "expectations"]].head(args.max_rows)
 
-    endpoint_fn = mlflow.genai.to_predict_fn(f"endpoints:/{args.endpoint}")
-
-    def predict_fn(input, custom_inputs=None):  # noqa: A002  (mirrors the agent request keys)
-        # Dataset rows are model-agnostic; the LLM under test is chosen per run.
-        return endpoint_fn(input=input, custom_inputs={**(custom_inputs or {}), "model": args.model})
+    predict_fn = endpoint_predict_fn(args.endpoint, args.model)
 
     vocab = eval_datasets.expression_systems(base) if spec.use_case == "bluesky" else None
     model_id, served = served_model_id(args.endpoint)
@@ -193,7 +240,8 @@ def main() -> None:
             data=data, predict_fn=predict_fn, scorers=sc.scorers_for(spec.use_case, vocab), model_id=model_id,
         )
         metrics = dict(result.metrics)
-        rows = persisted_results(run.info.run_id)
+        needed = ("hi_eq", "retrieval_groundedness") + (("answer_label",) if spec.use_case == "sj_global" else ())
+        rows = persisted_results(run.info.run_id, require=needed)
 
         if (auc := hi_vs_groundedness(rows)) is not None:
             mlflow.log_metric("hi_eq_vs_groundedness_auroc", auc)

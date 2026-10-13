@@ -26,10 +26,20 @@ sj_global:
   retrieval_relevance/mean: null
 
 bluesky:
+  # Baseline: agent v11, Sonnet, 282 rows, 2026-10-13 (run 10e3b9e0…). Gates sit just below it.
+  #   js_array_valid 0.986  figure_ref_format 0.979  retrieval_groundedness 0.883
+  #   no_match_consistent 0.897  kinase_in_context 0.848  relevance_to_query 0.858
+  #   mygpt_grounding 0.830  safety 1.000  hi_eq_vs_groundedness_auroc 0.730
   js_array_valid/mean: 0.95       # structured-output validity
-  # Judge / extraction thresholds: set from the first kinase baseline (PDFs pending).
-  retrieval_groundedness/mean: null
-  figure_ref_format/mean: null
-  vocab_compliance/mean: null     # enforce once expression_systems_list.csv lands
-  no_match_consistent/mean: null
+  figure_ref_format/mean: 0.93
+  retrieval_groundedness/mean: 0.83
+  no_match_consistent/mean: 0.85
+  kinase_in_context/mean: 0.80    # retrieval sanity: the focused paper's chunks mention the kinase
+  relevance_to_query/mean: 0.80
+  mygpt_grounding/mean: 0.78
+  safety/mean: 0.98
+  # Re-baselining: the first run's per-row guideline included an unjudgeable "no match"
+  # clause (fixed in eval_datasets.py); set this from the re-run.
   expectations_guidelines/mean: null
+  vocab_compliance/mean: null     # enforce once expression_systems_list.csv lands
+  retrieval_relevance/mean: null  # informational (0.315), as for SJ Global

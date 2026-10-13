@@ -47,7 +47,7 @@ endpoint's production traces + monitoring scorers.
 make eval-test                                                  # local unit tests
 make eval-corpus PROFILE=mygpt [KINASE_PDFS=<dir>]               # upload eval corpora to the docs volume
 databricks bundle deploy -p mygpt --var warehouse_id=<id>
-databricks bundle run mygpt_etl -p mygpt --var warehouse_id=<id> # + recreate/sync the index (02 SQL tail)
+databricks bundle run mygpt_etl -p mygpt --var warehouse_id=<id> # incremental parse + MERGE + index sync
 databricks bundle run mygpt_deploy_agent -p mygpt
 databricks bundle run mygpt_eval_build_datasets -p mygpt
 databricks bundle run mygpt_eval -p mygpt --params max_rows=5    # smoke (default matrix)

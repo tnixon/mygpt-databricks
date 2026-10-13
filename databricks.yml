@@ -18,9 +18,8 @@
 #   databricks bundle run mygpt_eval -p mygpt                  # Phase 2: eval runs (+ gates)
 #   databricks bundle run mygpt_eval_monitor -p mygpt          # Phase 2: production monitoring
 #
-# NOTE 1: the Vector Search index (re)creation remains an API step (see the tail of
-# etl/sql/02_parse_chunk_index.sql) because it must point the Delta Sync index at
-# the mygpt-embeddings gateway endpoint and sync the `section` column.
+# NOTE 1: Vector Search index CREATION remains a one-time API step (see the tail of
+# etl/sql/02_parse_chunk_index.sql); SYNCING it is the last task of mygpt_etl.
 # NOTE 2: mygpt_deploy_gateway needs a secret token with CAN QUERY on mygpt-bge-m3:
 #   databricks secrets create-scope mygpt --profile mygpt   # if absent
 #   databricks secrets put-secret mygpt gw_upstream_token --profile mygpt
@@ -30,7 +29,10 @@ bundle:
 
 # The eval jobs read St. Jude's MyGPT-evaluations CSVs from the synced submodule; the
 # eval-corpus PDFs go to the docs volume instead (`make eval-corpus`), so skip them here.
+# `include` is needed because .gitignore ignores reference/ (sync follows .gitignore).
 sync:
+  include:
+    - "reference/MyGPT-evaluations/**/*.csv"
   exclude:
     - "reference/**/*.pdf"
 
@@ -42,6 +44,9 @@ variables:
     default: structural_biology
   schema:
     default: mygpt
+  vs_index:
+    description: Corpus-aware Delta Sync index over doc_chunks (synced by mygpt_etl, queried by the agent).
+    default: doc_chunks_corpus_index
 
 resources:
   experiments:
@@ -73,6 +78,22 @@ resources:
             warehouse_id: ${var.warehouse_id}
             file:
               path: etl/sql/03_sections_and_config.sql
+        # 02 MERGEs chunk changes into doc_chunks; sync the TRIGGERED index so they become
+        # searchable, and wait until it has caught up (fails on a row-count mismatch).
+        - task_key: sync_index
+          depends_on: [{ task_key: parse_chunk_index }]
+          environment_key: default
+          spark_python_task:
+            python_file: etl/sync_index.py
+            parameters:
+              ["--index", "${var.catalog}.${var.schema}.${var.vs_index}",
+               "--source-table", "${var.catalog}.${var.schema}.doc_chunks"]
+      environments:
+        - environment_key: default
+          spec:
+            client: "1"
+            dependencies:
+              - databricks-sdk>=0.40
 
     mygpt_deploy_embedding:
       name: "[mygpt] Deploy bge-m3 embedding endpoint"
@@ -121,7 +142,7 @@ resources:
             python_file: agents/rag_agent/driver.py
             parameters:
               ["--catalog", "${var.catalog}", "--schema", "${var.schema}", "--base-dir", "${workspace.file_path}",
-               "--experiment", "${resources.experiments.mygpt_rag_agent.name}"]
+               "--experiment", "${resources.experiments.mygpt_rag_agent.name}", "--vs-index-name", "${var.vs_index}"]
       environments:
         - environment_key: default
           spec:
