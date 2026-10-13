@@ -17,6 +17,7 @@
 #   databricks bundle run mygpt_eval_build_datasets -p mygpt   # Phase 2: UC eval datasets
 #   databricks bundle run mygpt_eval -p mygpt                  # Phase 2: eval runs (+ gates)
 #   databricks bundle run mygpt_eval_monitor -p mygpt          # Phase 2: production monitoring
+#   (Phase 4) the app triggers mygpt_upload_ingest itself; see app/README.md for the order.
 #
 # NOTE 1: Vector Search index CREATION remains a one-time API step (see the tail of
 # etl/sql/02_parse_chunk_index.sql); SYNCING it is the last task of mygpt_etl.
@@ -47,8 +48,33 @@ variables:
   vs_index:
     description: Corpus-aware Delta Sync index over doc_chunks (synced by mygpt_etl, queried by the agent).
     default: doc_chunks_corpus_index
+  pg_project:
+    description: Lakebase project holding the app state (Phase 4). Its default branch is `production`.
+    default: mygpt
 
 resources:
+  # ---------------------------------------------------------------- Phase 4: Lakebase
+  # App state (libraries, per-user upload index, history, feedback). Creating the project also
+  # creates the `production` branch, its `primary` read-write endpoint and the default
+  # `databricks_postgres` database; the app's service principal creates and owns the `mygpt`
+  # schema on first start (app/server/db/migrations.ts).
+  postgres_projects:
+    mygpt:
+      project_id: ${var.pg_project}
+      display_name: MyGPT app state
+      pg_version: 17
+      default_endpoint_settings:
+        autoscaling_limit_min_cu: 0.5
+        autoscaling_limit_max_cu: 4
+
+  volumes:
+    # Upload-library files, one folder per library (written by the app, read by mygpt_upload_ingest).
+    uploads:
+      catalog_name: ${var.catalog}
+      schema_name: ${var.schema}
+      name: uploads
+      comment: "MyGPT upload libraries: uploads/<library_id>/<doc_id>__<file>"
+
   experiments:
     # Phase 2: ONE shared experiment for the agent lifecycle — LoggedModels (driver.py),
     # offline eval runs (eval/run_eval.py), and the endpoint's production traces +
@@ -94,6 +120,31 @@ resources:
             client: "1"
             dependencies:
               - databricks-sdk>=0.40
+
+    # Phase 4: index one upload library into Lakebase. Triggered by the app (job_parameters
+    # library_id) after an upload; one active run per library is enforced by the app.
+    mygpt_upload_ingest:
+      name: "[mygpt] Upload ingest — parse, chunk, embed into Lakebase"
+      max_concurrent_runs: 4
+      parameters:
+        - name: library_id
+          default: ""
+      tasks:
+        - task_key: upload_ingest
+          environment_key: default
+          spark_python_task:
+            python_file: etl/upload_ingest.py
+            parameters:
+              ["--library-id", "{{job.parameters.library_id}}",
+               "--pg-endpoint", "projects/${var.pg_project}/branches/production/endpoints/primary",
+               "--pg-schema", "mygpt", "--embed-endpoint", "mygpt-embeddings"]
+      environments:
+        - environment_key: default
+          spec:
+            client: "1"
+            dependencies:
+              - databricks-sdk>=0.70
+              - psycopg[binary]>=3.2
 
     mygpt_deploy_embedding:
       name: "[mygpt] Deploy bge-m3 embedding endpoint"

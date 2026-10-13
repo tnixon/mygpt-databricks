@@ -1,6 +1,6 @@
 # etl — Ingestion & medallion
 
-Target (Phase 3): Lakeflow Connect pipelines (**SharePoint / OneDrive** documents → **Unity Catalog**
+Target (Phase 3, deferred to the end of the roadmap): Lakeflow Connect pipelines (**SharePoint / OneDrive** documents → **Unity Catalog**
 (`structural_biology`)), bronze → silver → gold, with **PHI scanning on ingest**. Gold docs are
 embedded into **Databricks AI Search** (the global governed document index); structured tables
 feed **Genie**.
@@ -42,3 +42,18 @@ Index **creation** is a one-time API step; see the tail of `sql/02_parse_chunk_i
   agent endpoint's SELECT grant on the index is provisioned by `agents.deploy`, and a recreated
   index is a new object without it. Until the redeploy, every query returns
   `retrieve_error: PermissionDenied`.
+
+## Phase 4: the `mygpt_upload_ingest` job (upload libraries)
+User upload libraries live in Lakebase, not AI Search. The app writes uploads to
+`/Volumes/structural_biology/mygpt/uploads/<library_id>/` and triggers this job with
+`library_id`. The job, `upload_ingest.py`:
+- parses the library's pending documents with `ai_parse_document`;
+- chunks them with the **same section SQL as `02` steps 3 and 5** (inlined, so keep the two in
+  sync);
+- embeds the chunks via `mygpt-embeddings`;
+- writes each document's chunks to Lakebase `mygpt.upload_chunks` in one transaction (admin RLS
+  context).
+
+A failed document is marked `failed` with its error; the others still index. Re-running the job
+for a library resumes, because documents left in `parsing` are picked up again.
+

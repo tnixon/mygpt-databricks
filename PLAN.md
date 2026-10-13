@@ -7,7 +7,10 @@ implementation / test / validation cycle. For each phase:
 
 Settled sequencing decisions: evaluation runs **measurement-first** (Phase 2); multilingual stays in
 scope but **late** (Phase 6); the **current chat UI is kept as-is** through the build, with full UX
-parity as the **capstone (Phase 7)**.
+parity as the **capstone (Phase 7)**. The production ingestion lane (**Phase 3**) is **deferred to the
+end** (decided 2026-10-13): it runs after Phase 7, so the execution order is 4 → 5 → 6 → 7 → 3. Until
+then the incremental `mygpt_etl` job (volume folders → `doc_chunks` → `doc_chunks_corpus_index`) is
+the ingestion lane. Phase numbers are kept stable so existing references stay valid.
 
 ### Cross-cutting UX principle
 Phases 1–6 surface progress through *functional-minimum* additions to the existing chat UI
@@ -212,36 +215,150 @@ final flow — it fails AI Search validation; keep the index on `mygpt-bge-m3`.)
   `expression_systems_list.csv` for Q11 vocabulary compliance.
 - llama / gptoss baselines (`mygpt_eval` matrix override via `jobs run-now`, see eval/README).
 
-## Phase 3 — Production ingestion lane
-- **Goal:** replace the hand-run SQL with a governed, distributed, resumable pipeline feeding real corpora.
-- **Build:** `etl/` — Lakeflow Connect SharePoint/OneDrive → UC medallion; Spark + Jobs/Workflows (resumable, parallel) parse/chunk/embed/index; format coverage (DOCX/TXT, spreadsheets→structured tables, YouTube transcripts, Zotero); PHI scan on ingest; one-time ChromaDB → AI Search migration job.
-- **Replicates:** `document_processing.py`, `video_processing.py`, `zotero_integration.py`, `dataset_management.py`, section extraction, the ingestion queue (now distributed).
-- **Databricks:** Lakeflow Connect, Jobs/Workflows, Spark, `ai_parse_document`, UC (governance/PHI/lineage), Model Serving (embeddings), AI Search Delta Sync, Genie tables (for spreadsheets).
-- **Depends on:** Phase 1 (embedding-model decision).
-- **Closes gaps:** 4, 5, 8 (ingest), 11; plus the `etl/` medallion/PHI/governance.
-
 ## Phase 4 — Stateful backbone (Lakebase)
 - **Goal:** multi-user, persistent, personalized state.
 - **Build:** conversation/Q&A/sources/feedback schema; per-user upload index (Lakebase Search = vector + BM25/RRF); library self-service (create/list/delete) and public/private/group sharing; per-user RLS via UDF + session context. (History/feedback exposed in the chat UI at functional-minimum.)
 - **Replicates:** the Postgres schema (Conversation/Question/Answer/Source/feedback), multi-tenant dataset ownership (`resolve_dataset_for_user`), sharing model, feedback endpoints.
 - **Databricks:** Lakebase (Postgres), Lakebase Search, Unity Catalog RLS, OBO.
-- **Depends on:** Phase 1 (scores to persist), Phase 3 (governed libraries to manage/share).
+- **Depends on:** Phase 1 (scores to persist); the Phase-2 incremental ETL (a library = a volume-folder corpus + its `dataset_config` row). Phase 3 later adds SharePoint-sourced libraries under the same model.
 - **Closes gaps:** 7, 9, 14.
+
+**Settled design (plan approved 2026-10-13):**
+- **Libraries** are one Lakebase table with two kinds:
+  - **corpus**: the governed AI Search corpora, seeded as public and admin-owned. "All
+    governed documents" is the default.
+  - **upload**: user-created libraries, indexed in Lakebase.
+- **Upload index** = pgvector (bge-m3, HNSW cosine) plus full-text (`tsvector`/`ts_rank_cd`),
+  fused with RRF.
+  - The **app** runs this search under RLS and hands the hits to the agent as
+    `custom_inputs.sources`.
+  - The agent still reranks and scores (QRS/ARS/HI) and generates the answer, so the agent
+    never touches Lakebase.
+- **RLS = session context.**
+  - The app connects as its service principal, which owns the tables, and every table has
+    `FORCE ROW LEVEL SECURITY`.
+  - Each request runs in one transaction that sets `mygpt.user` / `mygpt.groups`.
+  - Policies are inlined on `libraries`. Child tables inherit them through RLS-filtered
+    `IN (SELECT id …)` subqueries.
+  - With no context set, only public rows are visible.
+- **Groups** = Databricks workspace groups, read from SCIM `/Me` with the user's token (cached
+  for 5 minutes).
+- **Upload ingest** = the `mygpt_upload_ingest` job, triggered by the app, with one active run
+  per library.
+  - It uses `ai_parse_document` and the same section-chunk SQL as `02`.
+  - It embeds via the `mygpt-embeddings` gateway in driver-side batches. This replaces the
+    planned `ai_query` over the gateway: whether that works isn't proven, and the agent already
+    uses this REST path.
+  - It commits one transaction per document, so a failed run can be re-run without redoing
+    finished files.
+- **Shared chat history** is opt-in per library (`share_history`). It applies only to
+  non-private libraries, and other members can read the history but not write to it.
+- **Feedback** is one row per (answer, user). It's also logged as a `user_rating` HUMAN
+  assessment on the agent's MLflow trace, using the agent's new `custom_outputs.trace_id`.
+
+### As-built (deployed + validated 2026-10-13)
+- **Deployed:**
+  - Lakebase project `mygpt`: `production` branch, `primary` endpoint, schema `mygpt` created
+    by the app SP through migrations `001`–`003`.
+  - `uploads` volume and `mygpt_upload_ingest` job (id 352016610803853).
+  - Agent v12 at 100%.
+  - The app, now bound to `app/databricks.yml` with 11 resources.
+- **Validated live:**
+  - Identity and SCIM groups; the 5 seeded libraries; per-library sections.
+  - Regression query through the app: QRS 54 / ARS 86 / HI 0, persisted to history.
+  - 👍 feedback is saved and written as a `user_rating` trace assessment.
+  - Upload of 2 FR policy PDFs → the ingest job indexed them (29 + 49 chunks) → the
+    upload-library Q&A is answered from only those documents.
+  - The app's UC resources grant `USE CATALOG` / `USE SCHEMA` themselves, and the SP may create
+    the `vector` extension. Both earlier watch-items are closed.
+- **Fixed during deploy:**
+  - `iam.current-user:read` is a default app scope and is rejected if listed in
+    `user_api_scopes`.
+  - The SDK resolves `config.host` lazily, so uploads now use `await config.getHost()`.
+  - `.cache()` (PERSIST) isn't allowed on serverless, so the ingest job no longer calls it.
+  - A failed run left documents stuck in `parsing`. They're now marked `failed`, and there's a
+    new `POST /api/libraries/:id/retry` endpoint plus a UI button.
+  - The SDK's `apiClient.request` turns a top-level JSON array into `{"0": …}`, and
+    `mygpt-embeddings` returns a bare `[[…]]`. `parseEmbedding` handles both.
+  - Keyword search had used AND-ed `websearch_to_tsquery`, which never matched a
+    natural-language question. It now uses OR-matching plus **Okapi BM25 in SQL** (IDF over the
+    library), because Lakebase has no `pg_search`: only `vector`, `lakebase_vector` and
+    `pg_trgm` are available.
+  - Upload libraries now take their scoring config from their language (`french` →
+    `health_policies_fr`, `spanish` → `health_policies_es`, which skip the English-only
+    reranker/NLI). Migration `003` backfills existing libraries.
+- **Open finding (Phase 6 / eval):** "objectifs du plan … en Algérie" fails the same way on the
+  upload library and on the governed FR corpus (AI Search). Both retrieve the methodology chunk
+  rather than the objectives list. This is general French retrieval quality, not specific to
+  uploads. Add upload libraries to the Phase-2 eval before tuning RRF / BM25 weights.
+- **Deploy gotcha:** `bundle run app` deploys the last-*synced* source. Run the app bundle's
+  own `bundle deploy` first (a root deploy doesn't sync `app/`).
+
+### Code map
+- **App server:**
+  - `app/server/db/{migrations,migrate,context,store}.ts`: schema, RLS, seed, and RLS-scoped
+    data access.
+  - `identity.ts` (email + groups), `ingest.ts` (job trigger and reconcile), `volumes.ts`
+    (uploads volume).
+  - `retrieval/{rrf,lakebaseSearch}.ts`, `routes/{libraries,ask,conversations}.ts`.
+- **Tests:**
+  - `server/db/rls.test.ts`: 14 RLS cases on in-process Postgres (PGlite + pgvector), run as
+    a NOSUPERUSER owner like the SP.
+  - `retrieval/lakebaseSearch.test.ts`: runs the hybrid SQL.
+  - `validation.test.ts`, `rrf.test.ts`.
+- **App client:** `app/client/src/{api.ts,MessageBubble.tsx,LibrariesPage.tsx,HistoryPage.tsx}`.
+  `App.tsx` gets a library selector, "New conversation", 👍/👎 feedback, and `/libraries` +
+  `/history` routes.
+- **Agent:** `agents/rag_agent/agent.py` adds `sources_from_inputs` (provided sources run
+  through the same RETRIEVER span) and `custom_outputs.trace_id`. Tests are in
+  `test_provided_sources.py`, which is part of `make eval-test`.
+- **Ingest job:** `etl/upload_ingest.py`.
+- **Bundles:**
+  - Root `databricks.yml` adds `postgres_projects.mygpt`, `volumes.uploads` and
+    `jobs.mygpt_upload_ingest`.
+  - `app/databricks.yml` adds the postgres / embeddings / volume / table / job / warehouse /
+    experiment resources (`iam.current-user:read` for SCIM `/Me` is a default app scope; it can't be listed explicitly).
+- **Stateless fallback:** without `LAKEBASE_ENDPOINT` (local dev) the app serves only the
+  default governed library: no history, feedback or uploads.
+
+### Deploy order
+1. `databricks bundle deploy -p mygpt --var warehouse_id=<id>` at the repo root. This creates
+   the Lakebase project, the uploads volume and the ingest job, and syncs the agent code.
+2. `databricks bundle run mygpt_deploy_agent -p mygpt --var warehouse_id=<id>`. This deploys
+   the agent version that accepts `custom_inputs.sources` and returns `trace_id`.
+3. In `app/`, once only: `databricks bundle deployment bind app st-jude-mygpt -p mygpt`.
+4. In `app/`: `databricks bundle deploy -p mygpt --var warehouse_id=<id> --var upload_job_id=<id>
+   --var experiment_id=2750091371639406`, then `databricks bundle run app -p mygpt`. The job id
+   comes from `databricks bundle summary -p mygpt` at the repo root.
+5. On first start the app SP creates the `mygpt` schema (migrations `001`/`002`); check the app
+   logs for `[lakebase] schema mygpt ready`.
+
+### Watch-items
+- Whether the ingest job's run-as identity (the deployer, i.e. the Lakebase project owner) can
+  write the SP-owned tables. It should, through `databricks_superuser`; otherwise add grants.
+- Whether the app SP may `CREATE EXTENSION vector` (migration `001`). If startup can't reach
+  Lakebase or a migration fails, the app logs `[lakebase] UNAVAILABLE` and keeps serving in
+  stateless mode.
+- `upload_ingest.py` reads every file in the library's folder with `read_files` and then joins
+  down to the pending documents. That's fine for small libraries; add a path filter if they
+  grow large.
+- pgvector HNSW filters per library *after* the ANN scan. For very large shared indexes,
+  consider `hnsw.iterative_scan` or per-library partial indexes.
 
 ## Phase 5 — Multi-agent Supervisor & tools
 - **Goal:** the net-new value — automatic routing, structured Q&A, domain tools.
 - **Build:** `agents/` — Mosaic AI Agent Framework Supervisor routing each query to AI Search (docs) / Genie (structured) / MCPs (tools); Unity AI Gateway (FMAPI primary + external Azure AI Foundry route); Hosted MCPs porting MyGPT's domain tools (PubMed-ID, RCSB PDB) plus write-side ingest tools; Genie over the structured/spreadsheet tables.
 - **Replicates:** the manual model dropdown → Supervisor; FastMCP tools (`MCP-server/mygpt_backend.py`); spreadsheet SQL querying → Genie.
 - **Databricks:** Mosaic AI Agent Framework, Unity AI Gateway, Hosted MCPs, Genie, Lakebase (session/user context).
-- **Depends on:** Phase 1 (retrieval as a tool), Phase 3 (structured tables), Phase 4 (user context).
+- **Depends on:** Phase 1 (retrieval as a tool), Phase 4 (user context); a seed structured table for Genie, landed by a minimal loader in Phase 5. Spreadsheet→table ingestion at scale arrives with Phase 3.
 - **Closes gaps:** 12; Supervisor + Genie routing (net-new).
 
 ## Phase 6 — Multilingual
 - **Goal:** enable the multilingual use case (e.g. SJ Global French/Spanish).
 - **Build:** per-dataset document language; query/answer translation; language-specific BM25 stemmers and rerankers; Devanagari/garbled-text parse fallback.
 - **Replicates:** translation fields + `translategemma` flow, language-specific stemmers/rerankers, pypdf→PyMuPDF fallback.
-- **Databricks:** FMAPI/Model Serving (translation + multilingual rerank/embeddings), AI Search, the Phase 3 ingestion lane.
-- **Depends on:** Phases 1, 3.
+- **Databricks:** FMAPI/Model Serving (translation + multilingual rerank/embeddings), AI Search, the `mygpt_etl` ingestion lane.
+- **Depends on:** Phases 1, 2. The Devanagari/garbled-text parse fallback goes into `etl/sql/02_parse_chunk_index.sql`.
 - **Closes gaps:** 10.
 
 ## Phase 7 — Full research-assistant UX parity (capstone)
@@ -249,8 +366,19 @@ final flow — it fails AI Search validation; keep the index on `mygpt-bge-m3`.)
 - **Build:** `app/` client — markdown/KaTeX/PDF rendering; source PDF viewer with cited-chunk highlighting and jump-to-page/timestamp; 3D embedding visualization; pipeline flow graphs; document/section focus selector UI; full History panel (search + CSV export); feedback controls; per-answer with/without-context comparison.
 - **Replicates:** `GPTHome.tsx` three-panel reader, `Plots.tsx` (3D PCA), `Flow/` graphs, `ChatHistory.tsx`, `Feedback.tsx`, highlighted-PDF workflow.
 - **Databricks:** Databricks Apps (AppKit/AI DevKit); consumes the Phase 1–6 APIs.
-- **Depends on:** Phases 1–6 (all data, scores, history, agents, languages to surface).
+- **Depends on:** Phases 1, 2, 4–6 (all data, scores, history, agents, languages to surface). Jump-to-timestamp for video sources lands once Phase 3 ingests YouTube transcripts.
 - **Closes gaps:** 6, 15; UI side of 9, 10, 13.
+
+## Phase 3 — Production ingestion lane (DEFERRED — runs last)
+Deferred on 2026-10-13; it now runs after Phase 7. It takes over what the interim `mygpt_etl` job
+stands in for in Phases 4–6: real SharePoint sources, structured spreadsheet tables, and the
+language-aware parse path.
+- **Goal:** replace the hand-run SQL with a governed, distributed, resumable pipeline feeding real corpora.
+- **Build:** `etl/` — Lakeflow Connect SharePoint/OneDrive → UC medallion; Spark + Jobs/Workflows (resumable, parallel) parse/chunk/embed/index; format coverage (DOCX/TXT, spreadsheets→structured tables, YouTube transcripts, Zotero); PHI scan on ingest; one-time ChromaDB → AI Search migration job.
+- **Replicates:** `document_processing.py`, `video_processing.py`, `zotero_integration.py`, `dataset_management.py`, section extraction, the ingestion queue (now distributed).
+- **Databricks:** Lakeflow Connect, Jobs/Workflows, Spark, `ai_parse_document`, UC (governance/PHI/lineage), Model Serving (embeddings), AI Search Delta Sync, Genie tables (for spreadsheets).
+- **Depends on:** Phase 1 (embedding-model decision).
+- **Closes gaps:** 4, 5, 8 (ingest), 11; plus the `etl/` medallion/PHI/governance.
 
 ---
 

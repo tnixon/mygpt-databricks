@@ -1,4 +1,4 @@
-import { createBrowserRouter, RouterProvider, NavLink, Outlet } from 'react-router';
+import { createBrowserRouter, RouterProvider, NavLink, Outlet, useSearchParams } from 'react-router';
 import { useState, useEffect, useMemo, type KeyboardEvent } from 'react';
 import {
   Button,
@@ -23,8 +23,11 @@ import {
   useIsMobile,
   useServingStream,
 } from '@databricks/appkit-ui/react';
-import { Menu, Send } from 'lucide-react';
-import { Markdown } from './Markdown';
+import { Menu, Plus, Send } from 'lucide-react';
+import { api, MODELS, type Library, type ModelAlias, type SectionOption } from './api';
+import { HistoryPage } from './HistoryPage';
+import { LibrariesPage } from './LibrariesPage';
+import { MessageBubble, type ChatMessage } from './MessageBubble';
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
   `px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
@@ -48,6 +51,12 @@ function NavLinks({ className, linkClass, onClick }: { className?: string; linkC
       <NavLink to="/" end className={linkClass} onClick={onClick}>
         Chat
       </NavLink>
+      <NavLink to="/libraries" className={linkClass} onClick={onClick}>
+        Libraries
+      </NavLink>
+      <NavLink to="/history" className={linkClass} onClick={onClick}>
+        History
+      </NavLink>
     </nav>
   );
 }
@@ -56,9 +65,8 @@ function Layout() {
   const isMobile = useIsMobile();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
-  useEffect(() => {
-    if (!isMobile) setMobileNavOpen(false);
-  }, [isMobile]);
+  // The sheet only exists on mobile; leaving mobile layout closes it.
+  const navOpen = isMobile && mobileNavOpen;
 
   return (
     <div className="min-h-screen bg-background flex flex-col">
@@ -66,7 +74,7 @@ function Layout() {
         <h1 className="font-edge text-xl font-bold tracking-tight text-sidebar-foreground">MyGPT</h1>
         <NavLinks className="hidden md:flex gap-1" linkClass={navLinkClass} />
         <div className="ml-auto md:hidden">
-          <Sheet open={mobileNavOpen} onOpenChange={setMobileNavOpen}>
+          <Sheet open={navOpen} onOpenChange={setMobileNavOpen}>
             <Button variant="ghost" size="icon" className="text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground" onClick={() => setMobileNavOpen(true)}>
               <Menu className="h-5 w-5" />
               <span className="sr-only">Open navigation</span>
@@ -91,7 +99,11 @@ function Layout() {
 const router = createBrowserRouter([
   {
     element: <Layout />,
-    children: [{ path: '/', element: <ChatPage /> }],
+    children: [
+      { path: '/', element: <ChatPage /> },
+      { path: '/libraries', element: <LibrariesPage /> },
+      { path: '/history', element: <HistoryPage /> },
+    ],
   },
 ]);
 
@@ -103,62 +115,14 @@ export default function App() {
 // Chat
 // ---------------------------------------------------------------------------
 
-const MODELS = [
-  { alias: 'sonnet', label: 'Claude Sonnet 5' },
-  { alias: 'llama', label: 'Llama 4 Maverick' },
-  { alias: 'gptoss', label: 'GPT-OSS 120B' },
-] as const;
-
-type ModelAlias = (typeof MODELS)[number]['alias'];
-
-interface Source {
-  source_name: string;
-  section?: string;
-  page: number | null;
-  snippet: string;
-  vector_score?: number | null;
-  bm25_score?: number | null;
-  rerank_score?: number | null;
-  nli?: string | null;
-}
-
-interface ChatMessage {
-  role: 'user' | 'assistant';
-  content: string;
-  model?: string;
-  sources?: Source[];
-  qrs?: number;
-  ars?: number | null;
-  hi_eq?: number | null;
-  hi_rf?: number | null;
-}
-
-interface AskResponse {
-  answer: string;
-  sources: Source[];
-  qrs: number;
-  ars: number | null;
-  hi_eq: number | null;
-  hi_rf: number | null;
-  model: string;
-}
-
-interface SectionOption {
-  section_title: string;
-  section_count: number;
-}
-
 // Pull the text delta out of an OpenAI-compatible streaming chunk.
 function extractDelta(chunk: unknown): string {
   const c = chunk as { choices?: Array<{ delta?: { content?: string } }> };
   return c.choices?.[0]?.delta?.content ?? '';
 }
 
-function modelLabel(alias?: string): string | undefined {
-  return MODELS.find((m) => m.alias === alias)?.label ?? alias;
-}
-
 function ChatPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [model, setModel] = useState<ModelAlias>(MODELS[0].alias);
@@ -166,22 +130,71 @@ function ChatPage() {
   const [queued, setQueued] = useState(false); // fires the direct (non-grounded) stream
   const [asking, setAsking] = useState(false); // grounded request in flight
   const [user, setUser] = useState<string | null>(null);
+  const [libraries, setLibraries] = useState<Library[]>([]);
+  const [libraryId, setLibraryId] = useState<string>('');
+  const [conversationId, setConversationId] = useState<string | undefined>(undefined);
   const [sections, setSections] = useState<SectionOption[]>([]);
   const [focusSection, setFocusSection] = useState<string>('all');
 
   useEffect(() => {
-    fetch('/api/whoami')
-      .then((r) => r.json())
-      .then((d: { user: string | null }) => setUser(d.user))
-      .catch(() => setUser(null));
+    api.whoami().then((d) => setUser(d.user)).catch(() => setUser(null));
+    api
+      .libraries()
+      .then((d) => {
+        // Only searchable libraries: governed corpora, and upload libraries with indexed docs.
+        const usable = d.libraries.filter((l) => l.kind === 'corpus' || l.status === 'ready');
+        setLibraries(usable);
+        const requested = searchParams.get('library');
+        const initial = usable.find((l) => l.id === requested) ?? usable.find((l) => l.is_default) ?? usable[0];
+        setLibraryId((cur) => cur || initial?.id || '');
+      })
+      .catch(() => setLibraries([]));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // "Continue in chat" from History: /?conversation=<id> reloads that conversation.
   useEffect(() => {
-    fetch('/api/sections')
-      .then((r) => r.json())
-      .then((d: { sections: SectionOption[] }) => setSections(d.sections ?? []))
+    const id = searchParams.get('conversation');
+    if (!id) return;
+    api
+      .conversation(id)
+      .then(({ conversation, turns }) => {
+        setConversationId(conversation.shared ? undefined : conversation.id);
+        if (conversation.library_id) setLibraryId(conversation.library_id);
+        setMessages(
+          turns.flatMap((t): ChatMessage[] => [
+            { role: 'user', content: t.question_text },
+            {
+              role: 'assistant', content: t.answer_text ?? '', model: t.model, sources: t.sources, qrs: t.qrs,
+              ars: t.ars, hi_eq: t.hi_eq, hi_rf: t.hi_rf, answer_id: t.answer_id, my_rating: t.my_rating,
+              my_comment: t.my_comment,
+            },
+          ]),
+        );
+      })
+      .catch(() => undefined)
+      .finally(() => setSearchParams({}, { replace: true }));
+  }, [searchParams, setSearchParams]);
+
+  useEffect(() => {
+    if (!libraryId) return;
+    setFocusSection('all');
+    api
+      .sections(libraryId)
+      .then((d) => setSections(d.sections ?? []))
       .catch(() => setSections([]));
-  }, []);
+  }, [libraryId]);
+
+  const newConversation = () => {
+    setMessages([]);
+    setConversationId(undefined);
+  };
+
+  const selectLibrary = (id: string) => {
+    if (id === libraryId) return;
+    setLibraryId(id);
+    newConversation(); // a conversation belongs to one library
+  };
 
   // Direct mode: stream straight from the model (no retrieval).
   const request = useMemo(
@@ -204,23 +217,19 @@ function ChatPage() {
   }, [queued, stream]);
   const streamingText = chunks.map(extractDelta).join('');
 
-  // Grounded mode: retrieve + cite via /api/ask.
+  // Grounded mode: retrieve + cite via /api/ask (persisted to the conversation).
   const askGrounded = (question: string) => {
     setAsking(true);
-    fetch('/api/ask', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    api
+      .ask({
         question,
         model,
+        library_id: libraryId || undefined,
+        conversation_id: conversationId,
         focus: focusSection !== 'all' ? { section: focusSection } : undefined,
-      }),
-    })
-      .then((r) => {
-        if (!r.ok) throw new Error('ask failed');
-        return r.json() as Promise<AskResponse>;
       })
       .then((d) => {
+        if (d.conversation_id) setConversationId(d.conversation_id);
         setMessages((prev) => [
           ...prev,
           {
@@ -232,6 +241,7 @@ function ChatPage() {
             ars: d.ars,
             hi_eq: d.hi_eq,
             hi_rf: d.hi_rf,
+            answer_id: d.answer_id,
           },
         ]);
       })
@@ -262,9 +272,11 @@ function ChatPage() {
     }
   };
 
+  const library = libraries.find((l) => l.id === libraryId);
+
   return (
     <div className="mx-auto flex h-full max-w-3xl flex-col gap-4">
-      {/* Toolbar: model · grounded toggle · identity · trust note */}
+      {/* Toolbar: model · grounded toggle · library · section · identity · trust note */}
       <div className="flex flex-wrap items-center gap-3">
         <Select value={model} onValueChange={(v) => setModel(v as ModelAlias)}>
           <SelectTrigger className="w-52">
@@ -284,6 +296,21 @@ function ChatPage() {
             Grounded
           </Label>
         </div>
+        {grounded && libraries.length > 0 && (
+          <Select value={libraryId} onValueChange={selectLibrary}>
+            <SelectTrigger className="w-64">
+              <SelectValue placeholder="Library" />
+            </SelectTrigger>
+            <SelectContent>
+              {libraries.map((l) => (
+                <SelectItem key={l.id} value={l.id}>
+                  {l.name}
+                  {l.kind === 'upload' ? ` · ${l.visibility}` : ''}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
         {grounded && sections.length > 0 && (
           <Select value={focusSection} onValueChange={setFocusSection}>
             <SelectTrigger className="w-52">
@@ -299,6 +326,10 @@ function ChatPage() {
             </SelectContent>
           </Select>
         )}
+        <Button variant="outline" size="sm" onClick={newConversation} disabled={busy || messages.length === 0}>
+          <Plus className="h-4 w-4" />
+          <span className="ml-1">New conversation</span>
+        </Button>
         <Badge variant="secondary">{user ? `Docs as ${user}` : 'Service principal · dev'}</Badge>
         <span className="ml-auto text-xs text-muted-foreground">
           AI-generated — verify before use.
@@ -313,7 +344,7 @@ function ChatPage() {
               <h2 className="font-edge text-2xl font-bold text-foreground">Ask MyGPT</h2>
               <p className="mt-1 text-sm text-muted-foreground">
                 {grounded
-                  ? 'Grounded in St. Jude research documents — answers cite their sources.'
+                  ? `Grounded in ${library?.name ?? 'St. Jude research documents'} — answers cite their sources.`
                   : 'Direct model chat (no document retrieval).'}
               </p>
             </div>
@@ -348,91 +379,6 @@ function ChatPage() {
           {busy ? <Spinner className="h-4 w-4" /> : <Send className="h-4 w-4" />}
           <span className="ml-2">Send</span>
         </Button>
-      </div>
-    </div>
-  );
-}
-
-function MessageBubble({ msg, streaming }: { msg: ChatMessage; streaming?: boolean }) {
-  const isUser = msg.role === 'user';
-  return (
-    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
-      <div
-        className={`max-w-[85%] rounded-lg px-4 py-3 text-sm ${
-          isUser ? 'bg-primary text-primary-foreground' : 'bg-muted text-foreground'
-        }`}
-      >
-        {!isUser && (
-          <div className="mb-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-            <span className="font-medium">MyGPT</span>
-            {msg.model && (
-              <Badge variant="outline" className="text-[10px]">
-                {modelLabel(msg.model)}
-              </Badge>
-            )}
-            {typeof msg.qrs === 'number' && (
-              <Badge variant="secondary" className="text-[10px]">
-                QRS {Math.round(msg.qrs)}
-              </Badge>
-            )}
-            {typeof msg.ars === 'number' && (
-              <Badge variant="secondary" className="text-[10px]">
-                ARS {Math.round(msg.ars)}
-              </Badge>
-            )}
-            {typeof msg.hi_eq === 'number' && (
-              <Badge
-                variant={msg.hi_eq >= 50 ? 'destructive' : 'secondary'}
-                className="text-[10px]"
-                title={typeof msg.hi_rf === 'number' ? `Random-forest HI: ${Math.round(msg.hi_rf)}` : undefined}
-              >
-                HI {Math.round(msg.hi_eq)}
-                {typeof msg.hi_rf === 'number' ? ` · RF ${Math.round(msg.hi_rf)}` : ''}
-              </Badge>
-            )}
-            {streaming && <Spinner className="h-3 w-3" />}
-          </div>
-        )}
-
-        {isUser ? (
-          <div className="whitespace-pre-wrap break-words">{msg.content}</div>
-        ) : msg.content ? (
-          <Markdown>{msg.content}</Markdown>
-        ) : (
-          streaming ? <span className="text-muted-foreground">…</span> : null
-        )}
-
-        {!isUser && msg.sources && msg.sources.length > 0 && (
-          <div className="mt-3 border-t border-border pt-2">
-            <div className="mb-1 text-xs font-medium text-muted-foreground">Sources</div>
-            <ol className="space-y-1">
-              {msg.sources.map((s, i) => (
-                <li key={i} className="flex items-start gap-2 text-xs">
-                  <span className="text-muted-foreground">[{i + 1}]</span>
-                  <span className="flex-1 break-words">
-                    <span className="font-medium">{s.source_name}</span>
-                    {s.page != null ? ` · p${s.page}` : ''}
-                    {s.section && s.section !== '(no section)' ? ` · ${s.section}` : ''}
-                  </span>
-                  {typeof s.rerank_score === 'number' && (
-                    <Badge variant="outline" className="text-[10px]" title="cross-encoder rerank score">
-                      ↕ {s.rerank_score.toFixed(2)}
-                    </Badge>
-                  )}
-                  {s.nli && (
-                    <Badge
-                      variant={s.nli === 'contradiction' ? 'destructive' : 'outline'}
-                      className="text-[10px]"
-                      title="answer↔source NLI entailment"
-                    >
-                      {s.nli}
-                    </Badge>
-                  )}
-                </li>
-              ))}
-            </ol>
-          </div>
-        )}
       </div>
     </div>
   );
