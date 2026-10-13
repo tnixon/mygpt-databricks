@@ -15,14 +15,11 @@ export function sanitizeFilename(name: string): string {
   return (cleaned || 'document').slice(-120);
 }
 
-function hostUrl(host: string | undefined): string {
-  if (!host) throw new Error('Databricks host is not configured');
-  return host.startsWith('http') ? host : `https://${host}`;
-}
-
 export async function uploadFile(path: string, contents: Buffer): Promise<void> {
   const wc = createWorkspaceClient();
-  const url = new URL(`/api/2.0/fs/files${encodeURI(path)}`, hostUrl(wc.config.host));
+  // getHost() resolves the SDK config first; `config.host` is unset until something has
+  // (in Apps the host comes from the injected env, resolved lazily).
+  const url = new URL(`/api/2.0/fs/files${encodeURI(path)}`, await wc.config.getHost());
   url.searchParams.set('overwrite', 'true');
   const headers = new Headers({
     'Content-Type': 'application/octet-stream',

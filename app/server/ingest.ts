@@ -87,6 +87,7 @@ export async function refreshIngest(db: Db, store: Store, who: Identity, library
         });
         // The job sets per-document status and the library status; only fix a library left
         // `ingesting` by a run that died before it could.
+        if (!outcome.ok) await store.failStrandedDocuments(q, libraryId, `ingest run failed: ${outcome.message}`);
         const lib = await store.getLibrary(q, libraryId);
         if (lib?.status === 'ingesting') await store.setLibraryStatus(q, libraryId, outcome.ok ? 'ready' : 'failed');
       });

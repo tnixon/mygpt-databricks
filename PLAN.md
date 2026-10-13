@@ -256,7 +256,45 @@ final flow — it fails AI Search validation; keep the index on `mygpt-bge-m3`.)
 - **Feedback** is one row per (answer, user). It's also logged as a `user_rating` HUMAN
   assessment on the agent's MLflow trace, using the agent's new `custom_outputs.trace_id`.
 
-### Code map (code complete 2026-10-13, pending deploy)
+### As-built (deployed + validated 2026-10-13)
+- **Deployed:**
+  - Lakebase project `mygpt`: `production` branch, `primary` endpoint, schema `mygpt` created
+    by the app SP through migrations `001`–`003`.
+  - `uploads` volume and `mygpt_upload_ingest` job (id 352016610803853).
+  - Agent v12 at 100%.
+  - The app, now bound to `app/databricks.yml` with 11 resources.
+- **Validated live:**
+  - Identity and SCIM groups; the 5 seeded libraries; per-library sections.
+  - Regression query through the app: QRS 54 / ARS 86 / HI 0, persisted to history.
+  - 👍 feedback is saved and written as a `user_rating` trace assessment.
+  - Upload of 2 FR policy PDFs → the ingest job indexed them (29 + 49 chunks) → the
+    upload-library Q&A is answered from only those documents.
+  - The app's UC resources grant `USE CATALOG` / `USE SCHEMA` themselves, and the SP may create
+    the `vector` extension. Both earlier watch-items are closed.
+- **Fixed during deploy:**
+  - `iam.current-user:read` is a default app scope and is rejected if listed in
+    `user_api_scopes`.
+  - The SDK resolves `config.host` lazily, so uploads now use `await config.getHost()`.
+  - `.cache()` (PERSIST) isn't allowed on serverless, so the ingest job no longer calls it.
+  - A failed run left documents stuck in `parsing`. They're now marked `failed`, and there's a
+    new `POST /api/libraries/:id/retry` endpoint plus a UI button.
+  - The SDK's `apiClient.request` turns a top-level JSON array into `{"0": …}`, and
+    `mygpt-embeddings` returns a bare `[[…]]`. `parseEmbedding` handles both.
+  - Keyword search had used AND-ed `websearch_to_tsquery`, which never matched a
+    natural-language question. It now uses OR-matching plus **Okapi BM25 in SQL** (IDF over the
+    library), because Lakebase has no `pg_search`: only `vector`, `lakebase_vector` and
+    `pg_trgm` are available.
+  - Upload libraries now take their scoring config from their language (`french` →
+    `health_policies_fr`, `spanish` → `health_policies_es`, which skip the English-only
+    reranker/NLI). Migration `003` backfills existing libraries.
+- **Open finding (Phase 6 / eval):** "objectifs du plan … en Algérie" fails the same way on the
+  upload library and on the governed FR corpus (AI Search). Both retrieve the methodology chunk
+  rather than the objectives list. This is general French retrieval quality, not specific to
+  uploads. Add upload libraries to the Phase-2 eval before tuning RRF / BM25 weights.
+- **Deploy gotcha:** `bundle run app` deploys the last-*synced* source. Run the app bundle's
+  own `bundle deploy` first (a root deploy doesn't sync `app/`).
+
+### Code map
 - **App server:**
   - `app/server/db/{migrations,migrate,context,store}.ts`: schema, RLS, seed, and RLS-scoped
     data access.
@@ -279,7 +317,7 @@ final flow — it fails AI Search validation; keep the index on `mygpt-bge-m3`.)
   - Root `databricks.yml` adds `postgres_projects.mygpt`, `volumes.uploads` and
     `jobs.mygpt_upload_ingest`.
   - `app/databricks.yml` adds the postgres / embeddings / volume / table / job / warehouse /
-    experiment resources and the `iam.current-user:read` scope.
+    experiment resources (`iam.current-user:read` for SCIM `/Me` is a default app scope; it can't be listed explicitly).
 - **Stateless fallback:** without `LAKEBASE_ENDPOINT` (local dev) the app serves only the
   default governed library: no history, feedback or uploads.
 
@@ -296,8 +334,6 @@ final flow — it fails AI Search validation; keep the index on `mygpt-bge-m3`.)
    logs for `[lakebase] schema mygpt ready`.
 
 ### Watch-items
-- Whether the app SP needs `USE CATALOG` / `USE SCHEMA` on `structural_biology.mygpt` in
-  addition to the volume/table `uc_securable` grants.
 - Whether the ingest job's run-as identity (the deployer, i.e. the Lakebase project owner) can
   write the SP-owned tables. It should, through `databricks_superuser`; otherwise add grants.
 - Whether the app SP may `CREATE EXTENSION vector` (migration `001`). If startup can't reach

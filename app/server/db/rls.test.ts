@@ -102,6 +102,14 @@ describe('library visibility', () => {
     expect(await visibleTo(bob)).not.toContain(groupLib);
   });
 
+  it('upload libraries are scored with their language’s config', async () => {
+    const fr = await withUser(db, alice, (q) =>
+      store.createUploadLibrary(q, alice.email, { name: 'fr', visibility: 'private', documents_language: 'french' }));
+    expect(fr.config_dataset).toBe('health_policies_fr');
+    expect((await withUser(db, alice, (q) => store.getLibrary(q, privateLib)))?.config_dataset).toBe('mygpt');
+    await withUser(db, alice, (q) => store.deleteLibrary(q, fr.id));
+  });
+
   it('public: everyone, including no context', async () => {
     expect(await visibleTo(bob)).toContain(publicLib);
     expect(await visibleTo(anon)).toContain(publicLib);

@@ -202,6 +202,26 @@ export function registerLibraryRoutes(app: Application, deps: Deps) {
     res.json({ deleted: true });
   }));
 
+  // Re-queue the library's failed documents and start an ingest run (owner only).
+  app.post('/api/libraries/:id/retry', handle('POST /api/libraries/retry', async (req, res) => {
+    const db = requireDb(deps, res);
+    if (!db) return;
+    const who = await getIdentity(req);
+    const lib = await loadOwnUploadLibrary(req, who);
+    if (!lib) {
+      res.status(404).json({ error: 'library not found or not yours' });
+      return;
+    }
+    const active = await withUser(db, who, (q) => store.activeIngestRun(q, lib.id));
+    if (active) {
+      res.status(409).json({ error: 'an ingest run is already in progress' });
+      return;
+    }
+    const requeued = await withUser(db, who, (q) => store.retryFailedDocuments(q, lib.id));
+    const run = requeued > 0 ? await startIngest(db, store, who, lib.id) : null;
+    res.json({ requeued, ingest_run: run });
+  }));
+
   app.get('/api/libraries/:id/status', handle('/api/libraries/status', async (req, res) => {
     const db = requireDb(deps, res);
     if (!db) return;

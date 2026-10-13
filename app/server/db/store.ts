@@ -119,6 +119,17 @@ export function tsConfigFor(language: string): string {
   return TS_CONFIGS[language.toLowerCase()] ?? 'simple';
 }
 
+/**
+ * The dataset_config row an upload library is scored with. The rerank / NLI models are
+ * English-only, so French / Spanish libraries reuse the governed policy corpora's configs,
+ * which turn them off (etl/sql/03_sections_and_config.sql). Other languages fall back to the
+ * default until Phase 6 (multilingual) adds per-language configs.
+ */
+export function configDatasetFor(language: string): string {
+  return ({ french: 'health_policies_fr', spanish: 'health_policies_es' } as Record<string, string>)[
+    language.toLowerCase()] ?? 'mygpt';
+}
+
 const LIB_COLS = `l.id, l.name, l.description, l.owner_email, l.visibility, l.group_name, l.share_history,
   l.kind, l.corpus, l.config_dataset, l.documents_language, l.status, l.is_default, l.created_at, l.updated_at`;
 
@@ -152,8 +163,8 @@ export class Store {
   async createUploadLibrary(q: Queryable, owner: string, input: LibraryInput): Promise<Library> {
     const r = await q.query<Library>(
       `INSERT INTO ${this.schema}.libraries AS l
-         (name, description, owner_email, visibility, group_name, share_history, kind, documents_language)
-       VALUES ($1, $2, $3, $4, $5, $6, 'upload', $7)
+         (name, description, owner_email, visibility, group_name, share_history, kind, documents_language, config_dataset)
+       VALUES ($1, $2, $3, $4, $5, $6, 'upload', $7, $8)
        RETURNING ${LIB_COLS}`,
       [
         input.name,
@@ -163,6 +174,7 @@ export class Store {
         input.visibility === 'group' ? (input.group_name ?? null) : null,
         input.share_history ?? false,
         input.documents_language ?? 'english',
+        configDatasetFor(input.documents_language ?? 'english'),
       ],
     );
     return r.rows[0];
@@ -234,6 +246,26 @@ export class Store {
       [libraryId],
     );
     return r.rows[0]?.n ?? 0;
+  }
+
+  /** After a run dies: documents it left mid-parse are failed with the run's message. */
+  async failStrandedDocuments(q: Queryable, libraryId: string, message: string): Promise<void> {
+    await q.query(
+      `UPDATE ${this.schema}.library_documents SET status = 'failed', error = $2, updated_at = now()
+       WHERE library_id = $1 AND status = 'parsing'`,
+      [libraryId, message.slice(0, 1000)],
+    );
+  }
+
+  /** Queue failed (and, with no run active, stranded `parsing`) documents for another
+   *  ingest run; returns how many were reset. Callers check there's no active run first. */
+  async retryFailedDocuments(q: Queryable, libraryId: string): Promise<number> {
+    const r = await q.query(
+      `UPDATE ${this.schema}.library_documents SET status = 'uploaded', error = NULL, updated_at = now()
+       WHERE library_id = $1 AND status IN ('failed', 'parsing') RETURNING id`,
+      [libraryId],
+    );
+    return r.rows.length;
   }
 
   async activeIngestRun(q: Queryable, libraryId: string): Promise<IngestRun | null> {

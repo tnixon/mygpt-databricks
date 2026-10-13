@@ -187,7 +187,8 @@ def main() -> None:
         spark = SparkSession.builder.getOrCreate()
         spark.createDataFrame(docs, "doc_id string, volume_path string, filename string").createOrReplaceTempView("_upload_docs")
         folder = docs[0][1].rsplit("/", 1)[0] + "/"  # every upload of a library shares its folder
-        spark.sql(ELEMENTS_SQL.format(folder=folder.replace("'", "''"))).cache().createOrReplaceTempView("_upload_elements")
+        # No .cache(): PERSIST isn't supported on serverless. The view is read once, by CHUNKS_SQL.
+        spark.sql(ELEMENTS_SQL.format(folder=folder.replace("'", "''"))).createOrReplaceTempView("_upload_elements")
         chunks = [r.asDict() for r in spark.sql(CHUNKS_SQL).collect()]
         print(f"[ingest] {len(chunks)} chunk(s) from {len({c['doc_id'] for c in chunks})} document(s)")
         vectors = embed(w, args.embed_endpoint, [c["chunk_text"] for c in chunks]) if chunks else []

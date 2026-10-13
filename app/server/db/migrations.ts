@@ -303,4 +303,17 @@ VALUES
 ON CONFLICT (owner_email, name) DO NOTHING;
 `,
   },
+  {
+    // Upload libraries created before configDatasetFor() were all scored with the English
+    // `mygpt` config (English-only reranker on French / Spanish text).
+    id: '003_upload_config_by_language',
+    sql: `
+SELECT set_config('mygpt.role', 'admin', true);
+UPDATE {{schema}}.libraries
+SET config_dataset = CASE documents_language
+      WHEN 'french' THEN 'health_policies_fr' WHEN 'spanish' THEN 'health_policies_es' ELSE 'mygpt' END,
+    updated_at = now()
+WHERE kind = 'upload' AND config_dataset = 'mygpt';
+`,
+  },
 ];

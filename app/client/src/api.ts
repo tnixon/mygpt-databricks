@@ -151,6 +151,8 @@ export const api = {
   },
   deleteDocument: (id: string, docId: string) =>
     call<{ deleted: boolean }>(`/api/libraries/${id}/documents/${docId}`, { method: 'DELETE' }),
+  retryFailed: (id: string) =>
+    call<{ requeued: number; ingest_run: IngestRun | null }>(`/api/libraries/${id}/retry`, { method: 'POST' }),
   status: (id: string) =>
     call<{ library: Library | null; documents: LibraryDocument[]; ingest_run: IngestRun | null }>(
       `/api/libraries/${id}/status`),

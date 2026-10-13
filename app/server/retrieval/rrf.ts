@@ -35,7 +35,7 @@ export function rrfFuse(vectorHits: RankedHit[], keywordHits: RankedHit[], k: nu
     .slice(0, k);
 }
 
-/** Scale keyword ranks (ts_rank_cd, unbounded) into [0, 1] against the best hit. */
+/** Scale keyword scores (BM25, unbounded) into [0, 1] against the best hit. */
 export function normalizeKeywordScores(scores: Map<string, number>): Map<string, number> {
   const max = Math.max(0, ...scores.values());
   return new Map([...scores].map(([id, s]) => [id, max > 0 ? Math.round((s / max) * 1e4) / 1e4 : 0]));

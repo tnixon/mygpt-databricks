@@ -32,11 +32,11 @@ resources:
       lifecycle:
         started: true
 
-      # Run serving calls on behalf of the signed-in user (OBO); read their groups (SCIM /Me)
-      # for group-shared libraries.
+      # Run serving calls on behalf of the signed-in user (OBO). Reading their groups (SCIM /Me)
+      # for group-shared libraries uses iam.current-user:read, a DEFAULT scope every app gets
+      # (listing it here is rejected as invalid).
       user_api_scopes:
         - serving.serving-endpoints
-        - iam.current-user:read
 
       # FMAPI foundation-model endpoints (direct chat) + the MyGPT agent endpoint, and the
       # Phase 4 state: Lakebase, the embeddings gateway, the uploads volume, the ingest job,

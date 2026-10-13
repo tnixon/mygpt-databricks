@@ -281,6 +281,11 @@ function LibraryCard({
       .catch((e: Error) => setError(e.message));
   };
 
+  const retry = () => {
+    setError(null);
+    api.retryFailed(lib.id).then(() => { refresh(); onChanged(); }).catch((e: Error) => setError(e.message));
+  };
+
   const remove = () => {
     if (!window.confirm(`Delete library “${lib.name}” and all its documents?`)) return;
     api.deleteLibrary(lib.id).then(onChanged).catch((e: Error) => setError(e.message));
@@ -344,6 +349,11 @@ function LibraryCard({
               {busy ? <Spinner className="h-4 w-4" /> : <Upload className="h-4 w-4" />}
               <span className="ml-1">Upload documents</span>
             </Button>
+            {lib.status !== 'ingesting' && docs.some((d) => d.status === 'failed' || d.status === 'parsing') && (
+              <Button variant="outline" size="sm" onClick={retry}>
+                Retry failed
+              </Button>
+            )}
             <Button variant="ghost" size="sm" className="ml-auto text-destructive" onClick={remove}>
               <Trash2 className="h-4 w-4" />
               <span className="ml-1">Delete library</span>
