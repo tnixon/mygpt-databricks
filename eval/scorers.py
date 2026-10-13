@@ -1,4 +1,6 @@
-"""Scorers for the MyGPT Phase-2 eval harness (guidelines-only: no gold answers yet).
+"""Scorers for the MyGPT eval harness: guidelines judges + code scorers, plus gold
+scorers that read ``expectations`` (expected_label / expected_values / expected_response /
+expected_facts — see eval_datasets.py) and skip rows without gold.
 
 ``outputs`` is the ``mygpt-rag-agent`` ResponsesAgent response
 (``{"output": [...message...], "custom_outputs": {qrs, ars, hi_eq, sources, ...}}``) and
@@ -15,6 +17,7 @@ from __future__ import annotations
 import json
 import re
 
+from eval_datasets import yes_no_label
 from mlflow.entities import Feedback
 from mlflow.genai.scorers import (
     ExpectationsGuidelines,
@@ -149,14 +152,6 @@ def focus_adherence(inputs, outputs) -> bool | None:
 # --------------------------------------------------------------------------- #
 # SJ Global — health_policies
 # --------------------------------------------------------------------------- #
-def yes_no_label(text: str) -> str:
-    m = re.match(r"^[\s*_#>\"']*(yes|no|oui|non|s[ií])\b", text.strip(), flags=re.IGNORECASE)
-    if not m:
-        return "unparseable"
-    word = m.group(1).lower()
-    return "yes" if word in ("yes", "oui", "si", "sí") else "no"
-
-
 @scorer
 def yes_no_format(outputs) -> Feedback:
     """The answer starts with Yes / No, as every SJ Global question instructs."""
@@ -254,6 +249,131 @@ def kinase_in_context(inputs, outputs, trace) -> list | None:
 
 
 # --------------------------------------------------------------------------- #
+# gold scorers — read expectations; None on rows without gold
+# --------------------------------------------------------------------------- #
+@scorer
+def yes_no_correct(outputs, expectations) -> Feedback | None:
+    """SJ Global / BioASQ yes-no: the answer's opening Yes / No matches the gold label."""
+    gold = (expectations or {}).get("expected_label")
+    if gold not in ("yes", "no"):
+        return None
+    said = yes_no_label(answer_text(outputs))
+    return Feedback(value=said == gold, rationale=f"answered {said}, gold {gold}")
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(text).lower())
+
+
+# Expression-system spellings -> the canonical names the BlueSky SMEs used in the gold.
+_EXPRESSION_ALIASES = {
+    "hek293t": "hek293", "hek293cells": "hek293",
+    "cos1": "cos", "cos7": "cos", "coscells": "cos",
+    "escherichiacoli": "ecoli", "bl21de3": "ecoli", "bl21": "ecoli",
+    "sf21cells": "sf21", "sf9cells": "sf9",
+    "nih3t3cells": "nih3t3",
+}
+
+
+def _expression_key(name: str) -> str:
+    key = _norm(name)
+    return _EXPRESSION_ALIASES.get(key, key)
+
+
+def _answer_items(text: str) -> list[str]:
+    arr = parse_js_array(text)
+    if arr is not None:
+        return [str(x) for x in arr]
+    return [_strip(text).strip("'\"")]
+
+
+@scorer
+def expression_system_correct(inputs, outputs, expectations) -> Feedback | None:
+    """BlueSky Q11: the extracted expression system matches one of the gold systems
+    (normalized: case / punctuation, plus common aliases such as HEK293T -> HEK293)."""
+    gold = (expectations or {}).get("expected_values")
+    if kinase_question(inputs)[0] != "11" or not gold:
+        return None
+    text = answer_text(outputs)
+    if is_sentinel(text):
+        return Feedback(value=False, rationale=f"sentinel; gold {gold}")
+    want = {_expression_key(g) for g in gold}
+    got = {_expression_key(x) for x in _answer_items(text)}
+    return Feedback(value=bool(want & got), rationale=f"extracted {sorted(got)}, gold {sorted(want)}")
+
+
+_ROMAN = {"i": 1, "ii": 2, "iii": 3, "iv": 4, "v": 5, "vi": 6, "vii": 7, "viii": 8, "ix": 9, "x": 10}
+_FIG_NUM = re.compile(
+    r"^(?P<supp>supplementa(?:ry|l)\s*|s(?=fig|table|t\d))?"
+    r"(?P<kind>fig(?:ure)?s?|tables?|t)\.?\s*(?P<supp2>s)?(?P<num>\d+|[ivx]+\b)",
+    re.IGNORECASE,
+)
+
+
+def figure_key(ref: str) -> str | None:
+    """'Fig. 4B' -> 'fig4', 'Table III' -> 'table3', 'SFig.8' / 'Supplementary Figure S8' ->
+    'sfig8', 'ST1' -> 'stable1'. Panel letters are dropped (the SMEs graded at figure level)."""
+    m = _FIG_NUM.match(str(ref).strip())
+    if not m:
+        return None
+    num = m.group("num").lower()
+    num = str(_ROMAN[num]) if num in _ROMAN else num
+    kind = "fig" if m.group("kind").lower().startswith("f") else "table"
+    supp = "s" if (m.group("supp") or m.group("supp2")) else ""
+    return f"{supp}{kind}{num}"
+
+
+@scorer
+def figure_ref_match(inputs, outputs, expectations) -> list | None:
+    """BlueSky Q17: overlap between the answer's and the gold's figure / table refs.
+    `figure_ref_match` = any overlap (how leniently the SMEs graded MyGPT);
+    `figure_ref_recall` = share of the gold refs found."""
+    gold = (expectations or {}).get("expected_values")
+    if kinase_question(inputs)[0] != "17" or not gold:
+        return None
+    want = {k for k in (figure_key(g) for g in gold) if k}
+    if not want:
+        return None
+    text = answer_text(outputs)
+    got = set() if is_sentinel(text) else {k for k in (figure_key(x) for x in _answer_items(text)) if k}
+    hit = want & got
+    rationale = f"answer {sorted(got)}, gold {sorted(want)}"
+    return [
+        Feedback(name="figure_ref_match", value=bool(hit), rationale=rationale),
+        Feedback(name="figure_ref_recall", value=len(hit) / len(want), rationale=rationale),
+    ]
+
+
+@scorer
+def factoid_match(outputs, expectations) -> Feedback | None:
+    """BioASQ factoid: the answer contains any gold entity synonym (normalized substring) —
+    BioASQ's lenient accuracy."""
+    gold = (expectations or {}).get("expected_values")
+    if not gold or (expectations or {}).get("expected_label"):
+        return None
+    text = _norm(answer_text(outputs))
+    hits = [g for g in gold if len(_norm(g)) > 1 and _norm(g) in text]
+    return Feedback(value=bool(hits), rationale=f"matched {hits[:3]}" if hits else f"none of {gold[:5]}")
+
+
+@scorer
+def gold_correctness(inputs, outputs, expectations) -> Feedback | None:
+    """MLflow's Correctness judge, only on rows that carry expected_response / expected_facts
+    (the built-in raises on rows without them)."""
+    from mlflow.genai.judges import is_correct
+
+    exp = expectations or {}
+    facts, response = exp.get("expected_facts"), exp.get("expected_response")
+    if not facts and not response:
+        return None
+    return is_correct(
+        request=_question(inputs), response=answer_text(outputs),
+        expected_facts=facts or None, expected_response=None if facts else response,
+        name="gold_correctness",
+    )
+
+
+# --------------------------------------------------------------------------- #
 # scorer sets per use case
 # --------------------------------------------------------------------------- #
 _GROUNDING_GUIDELINES = Guidelines(
@@ -277,8 +397,15 @@ def judges() -> list:
 def scorers_for(use_case: str, vocab: list[str] | None = None) -> list:
     shared = [retrieval_ok, mygpt_trust, focus_adherence]
     if use_case == "sj_global":
-        return judges() + shared + [yes_no_format, answer_label]
+        return judges() + shared + [yes_no_format, answer_label, yes_no_correct, gold_correctness]
     if use_case == "bluesky":
         extra = [make_vocab_compliance(vocab)] if vocab else []
-        return judges() + shared + [js_array_valid, figure_ref_format, kinase_in_context] + extra
+        return judges() + shared + [
+            js_array_valid, figure_ref_format, kinase_in_context,
+            expression_system_correct, figure_ref_match, gold_correctness,
+        ] + extra
+    if use_case == "bioasq":
+        # No focus_adherence (library-wide retrieval) and no yes_no_format (87 of the 163
+        # are factoid questions); yes_no_correct / factoid_match skip the other type.
+        return judges() + [retrieval_ok, mygpt_trust, yes_no_correct, factoid_match, gold_correctness]
     raise ValueError(f"Unknown use case {use_case!r}")

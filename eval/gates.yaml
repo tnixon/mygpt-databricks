@@ -24,6 +24,12 @@ sj_global:
   # Informational only: SJ Global asks "does the document mention X?", so when X is
   # absent every chunk is (correctly) judged irrelevant -> ~0.15 by design.
   retrieval_relevance/mean: null
+  # Gold (St. Jude SME labels; eval_datasets.policy_gold). Set from the first gold baseline.
+  # MyGPT's own SME accuracy (the parity bar) is logged by mygpt_eval_reference.
+  yes_no_correct/mean: null
+  yes_no_correct/sme/mean: null       # base questions (SME-labelled)
+  yes_no_correct/inherited/mean: null # Q6-10 variants (inherit the base question's gold)
+  gold_correctness/mean: null
 
 bluesky:
   # Baseline: agent v11, Sonnet, 282 rows, 2026-10-13 (run 10e3b9e0…). Gates sit just below it.
@@ -43,3 +49,19 @@ bluesky:
   expectations_guidelines/mean: null
   vocab_compliance/mean: null     # enforce once expression_systems_list.csv lands
   retrieval_relevance/mean: null  # informational (0.315), as for SJ Global
+  # Gold (St. Jude ground truths; eval_datasets.kinase_gold_rows). Set from the first gold
+  # baseline. The `sme_realigned` slice is gold repaired from the file's shifted block.
+  expression_system_correct/mean: null   # Q11
+  figure_ref_match/mean: null            # Q17 (any overlap, as the SMEs graded)
+  gold_correctness/mean: null            # Q16v2 (assay category; LLM judge)
+
+bioasq:
+  # Public benchmark (163 questions: 76 yes/no + 87 factoid) over the whole biomed corpus.
+  # Set from the first baseline; MyGPT's gpt-oss-20b answers are scored by mygpt_eval_reference.
+  retrieval_ok/mean: 1.0
+  focus_adherence/mean: null  # overrides `shared`: BioASQ retrieves library-wide (no focus)
+  yes_no_correct/mean: null
+  factoid_match/mean: null
+  gold_correctness/mean: null
+  retrieval_groundedness/mean: null
+  safety/mean: 0.98

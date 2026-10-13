@@ -7,8 +7,9 @@ DABs job: mygpt_eval (one for_each iteration per dataset x model). Each run:
   * links the run to the served agent's LoggedModel (model_id), so results line up
     against model versions in the shared experiment;
   * logs post-run metrics/artifacts — the HI-vs-groundedness AUROC (do MyGPT's own
-    trust scores agree with the judges?) and, for SJ Global, the policy x question
-    coding matrix;
+    trust scores agree with the judges?), gold-scorer means split by gold provenance
+    (SME / inherited / realigned), and, for SJ Global, the policy x question coding
+    matrix plus its comparison with the SME gold;
   * optionally gates on eval/gates.yaml (non-zero exit on a miss).
 
 Usage:
@@ -153,6 +154,66 @@ def hi_vs_groundedness(df) -> float | None:
     )
 
 
+def _record_key(req: dict) -> tuple[str | None, str | None]:
+    """(question text, focused document) — the identity of a dataset row in a trace."""
+    ci = req.get("custom_inputs") or {}
+    question = next((m.get("content") for m in req.get("input", []) if m.get("role") == "user"), None)
+    docs = (ci.get("focus") or {}).get("documents") or [None]
+    return question, docs[0]
+
+
+def _records_by_key(records: list[dict]) -> dict:
+    return {_record_key(r["inputs"]): r for r in records}
+
+
+# Gold scorers whose means are also reported per gold provenance (tags.gold).
+GOLD_SCORERS = ("yes_no_correct", "expression_system_correct", "figure_ref_match", "factoid_match", "gold_correctness")
+
+
+def gold_breakdown(df, records: list[dict]) -> dict[str, float]:
+    """`<scorer>/<gold>/mean` for each gold scorer and provenance, e.g. yes_no_correct on the
+    SME-labelled base questions vs the variants that inherit their gold."""
+    if df is None or df.empty:
+        return {}
+    by_key = _records_by_key(records)
+    gold = [((by_key.get(_record_key(_request_of(row))) or {}).get("tags") or {}).get("gold") for _, row in df.iterrows()]
+    out = {}
+    for name in GOLD_SCORERS:
+        col = f"{name}/value"
+        if col not in df:
+            continue
+        groups: dict[str, list[float]] = {}
+        for g, v in zip(gold, df[col]):
+            if g and v is not None and str(v) not in ("nan", "None"):
+                groups.setdefault(g, []).append(1.0 if str(v).lower() in ("true", "yes", "1", "1.0") else 0.0)
+        for g, vals in groups.items():
+            out[f"{name}/{g}/mean"] = sum(vals) / len(vals)
+    return out
+
+
+def coding_matrix_vs_gold(df, records: list[dict]):
+    """SJ Global: each (document, question) answer label beside its gold label, for the
+    rows that have gold — the per-cell view behind yes_no_correct."""
+    import pandas as pd
+
+    if df is None or "answer_label/value" not in df:
+        return None
+    by_key = _records_by_key(records)
+    cells = []
+    for _, row in df.iterrows():
+        rec = by_key.get(_record_key(_request_of(row)))
+        if not rec or not rec["expectations"].get("expected_label"):
+            continue
+        tags = rec["tags"]
+        cells.append({
+            "document": tags["document"], "question_key": tags["question_key"], "variant": tags["variant"],
+            "gold_source": tags["gold"], "answer": row["answer_label/value"],
+            "gold": rec["expectations"]["expected_label"],
+            "correct": row["answer_label/value"] == rec["expectations"]["expected_label"],
+        })
+    return pd.DataFrame(cells) if cells else None
+
+
 def coding_matrix(df, records: list[dict]):
     """SJ Global deliverable: policy document x question_key -> yes / no / unparseable."""
     import pandas as pd
@@ -192,7 +253,7 @@ def check_gates(metrics: dict, use_case: str, gates_file: str) -> list[str]:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dataset", required=True, help="health_policies_fr | health_policies_es | kinase_literature")
+    ap.add_argument("--dataset", required=True, help="health_policies_fr | health_policies_es | kinase_literature | bioasq")
     ap.add_argument("--model", default="sonnet", help="agent LLM alias: sonnet | llama | gptoss")
     ap.add_argument("--endpoint", default="mygpt-rag-agent")
     ap.add_argument("--catalog", default="structural_biology")
@@ -246,10 +307,17 @@ def main() -> None:
         if (auc := hi_vs_groundedness(rows)) is not None:
             mlflow.log_metric("hi_eq_vs_groundedness_auroc", auc)
             metrics["hi_eq_vs_groundedness_auroc"] = auc
+        records = eval_datasets.build_records(args.dataset, base)
+        if breakdown := gold_breakdown(rows, records):
+            mlflow.log_metrics(breakdown)
+            metrics.update(breakdown)
         if spec.use_case == "sj_global":
-            matrix = coding_matrix(rows, eval_datasets.build_records(args.dataset, base))
+            matrix = coding_matrix(rows, records)
             if matrix is not None:
                 mlflow.log_table(matrix.reset_index(), artifact_file="coding_matrix.json")
+            vs_gold = coding_matrix_vs_gold(rows, records)
+            if vs_gold is not None:
+                mlflow.log_table(vs_gold, artifact_file="coding_matrix_vs_gold.json")
 
     for k in sorted(metrics):
         print(f"  {k}: {metrics[k]:.3f}" if isinstance(metrics[k], float) else f"  {k}: {metrics[k]}")
