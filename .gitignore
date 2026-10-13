@@ -219,3 +219,6 @@ __marimo__/
 
 # ignore Isaac config
 .isaac
+
+# ignore changes in references
+reference/

@@ -1,4 +1,4 @@
--- MyGPT ingest — parse + section-aware chunk, then build the AI Search index.
+-- MyGPT ingest — parse + section-aware chunk, then MERGE into the AI Search source table.
 -- Runs after 01_landing_documents.sql. Catalog: structural_biology.
 --
 -- Phase 1 changes vs. Phase 0:
@@ -9,18 +9,57 @@
 --   * re-embeds via the custom `mygpt-bge-m3` Model Serving endpoint (gap 1).
 -- Phase 2: carries `corpus` (from 01) through to the chunks + index so the agent can
 --   isolate retrieval per corpus (eval corpora vs. the biomed seed).
--- This file is run as a task of the DABs ETL job (see databricks.yml).
+-- Phase 2 (incremental): nothing is rebuilt from scratch.
+--   * only NEW or CHANGED files (by size + modification_time, tracked in doc_parse_log)
+--     go through ai_parse_document — also keeps its run-to-run variance from churning
+--     chunks of unchanged documents;
+--   * chunks are MERGEd into doc_chunks on a stable chunk_id (01 hashes the path), so
+--     unchanged chunks emit no change-feed rows and the Delta Sync index only re-embeds
+--     what changed. The job's `sync_index` task (etl/sync_index.py) then syncs the index.
+--   Force a re-parse of a document by deleting its doc_parse_log row.
+-- This file is run as a task of the DABs ETL job (see databricks.yml). Statements run in
+-- order; the `_`-prefixed tables are per-run staging, dropped at the end.
 
--- 1) Parse each FILE and explode into document elements, tagging section headers.
---    CDF stays on so the Vector Search Delta Sync index can incrementally sync.
-CREATE OR REPLACE TABLE structural_biology.mygpt.doc_elements
-TBLPROPERTIES (delta.enableChangeDataFeed = true) AS
+-- 0) Persistent tables (created on first run; existing tables keep their data).
+CREATE TABLE IF NOT EXISTS structural_biology.mygpt.doc_elements (
+  doc_id BIGINT, path STRING, corpus STRING, idx INT, elem_type STRING, page INT,
+  content STRING, header_text STRING, section STRING
+);
+
+-- CDF on: the Vector Search Delta Sync index syncs incrementally from the change feed.
+CREATE TABLE IF NOT EXISTS structural_biology.mygpt.doc_chunks (
+  chunk_id STRING, doc_id BIGINT, path STRING, source_name STRING, corpus STRING,
+  section STRING, page INT, elem_type STRING, chunk_text STRING
+) TBLPROPERTIES (delta.enableChangeDataFeed = true);
+
+-- One row per parsed document version: what ai_parse_document has already processed.
+CREATE TABLE IF NOT EXISTS structural_biology.mygpt.doc_parse_log (
+  doc_id BIGINT, path STRING, corpus STRING, size_bytes BIGINT,
+  modification_time TIMESTAMP, parsed_at TIMESTAMP, n_elements BIGINT
+);
+
+-- 1) Documents in scope: PDFs in the corpus allow-list (one top-level volume folder
+--    each); add new corpora here. Anything outside it is removed downstream.
+CREATE OR REPLACE TABLE structural_biology.mygpt._docs_in_scope AS
+SELECT id AS doc_id, path, corpus, size_bytes, modification_time, file
+FROM structural_biology.mygpt.documents
+WHERE content_type = 'application/pdf'
+  AND corpus IN ('biomed', 'health_policies_fr', 'health_policies_es', 'kinase_literature');
+
+-- 2) New or changed documents = in scope, but this exact file version was never parsed.
+CREATE OR REPLACE TABLE structural_biology.mygpt._docs_to_parse AS
+SELECT d.*
+FROM structural_biology.mygpt._docs_in_scope d
+LEFT ANTI JOIN structural_biology.mygpt.doc_parse_log l
+  ON  d.doc_id = l.doc_id
+  AND d.size_bytes = l.size_bytes
+  AND d.modification_time = l.modification_time;
+
+-- 3) Parse only those, and explode into document elements tagged with their section.
+CREATE OR REPLACE TABLE structural_biology.mygpt._doc_elements_stage AS
 WITH parsed AS (
-  SELECT id AS doc_id, path, corpus, ai_parse_document(file) AS d
-  FROM structural_biology.mygpt.documents
-  WHERE content_type = 'application/pdf'
-  -- corpus allow-list (one top-level volume folder each); add new corpora here
-  AND corpus IN ('biomed', 'health_policies_fr', 'health_policies_es', 'kinase_literature')
+  SELECT doc_id, path, corpus, ai_parse_document(file) AS d
+  FROM structural_biology.mygpt._docs_to_parse
 ),
 elems AS (
   SELECT doc_id, path, corpus, idx, e
@@ -54,11 +93,40 @@ sectioned AS (
     ) AS section
   FROM tagged
 )
-SELECT * FROM sectioned;
+SELECT doc_id, path, corpus, idx, elem_type, page, content, header_text, section FROM sectioned;
 
--- 2) Merge body elements into ~1000-char, section-bounded chunks (no overlap).
-CREATE OR REPLACE TABLE structural_biology.mygpt.doc_chunks
-TBLPROPERTIES (delta.enableChangeDataFeed = true) AS
+-- 4) Apply element changes: drop elements of re-parsed and out-of-scope (removed file /
+--    dropped corpus) documents, then add the freshly parsed ones.
+DELETE FROM structural_biology.mygpt.doc_elements
+WHERE doc_id IN (SELECT doc_id FROM structural_biology.mygpt._docs_to_parse)
+   OR doc_id NOT IN (SELECT doc_id FROM structural_biology.mygpt._docs_in_scope);
+
+INSERT INTO structural_biology.mygpt.doc_elements
+  (doc_id, path, corpus, idx, elem_type, page, content, header_text, section)
+SELECT doc_id, path, corpus, idx, elem_type, page, content, header_text, section
+FROM structural_biology.mygpt._doc_elements_stage;
+
+-- Record the parsed versions (n_elements = 0 still counts as parsed, so a document that
+-- yields no elements isn't re-parsed every run) and forget out-of-scope documents.
+MERGE INTO structural_biology.mygpt.doc_parse_log t
+USING (
+  SELECT p.doc_id, p.path, p.corpus, p.size_bytes, p.modification_time,
+         current_timestamp() AS parsed_at, count(e.idx) AS n_elements
+  FROM structural_biology.mygpt._docs_to_parse p
+  LEFT JOIN structural_biology.mygpt._doc_elements_stage e ON e.doc_id = p.doc_id
+  GROUP BY p.doc_id, p.path, p.corpus, p.size_bytes, p.modification_time
+) s
+ON t.doc_id = s.doc_id
+WHEN MATCHED THEN UPDATE SET *
+WHEN NOT MATCHED THEN INSERT *;
+
+DELETE FROM structural_biology.mygpt.doc_parse_log
+WHERE doc_id NOT IN (SELECT doc_id FROM structural_biology.mygpt._docs_in_scope);
+
+-- 5) Re-derive ALL chunks from doc_elements (cheap SQL, and deterministic: unchanged
+--    documents keep identical elements, so they produce identical chunks).
+--    ~1000-char, section-bounded chunks (no overlap).
+CREATE OR REPLACE TABLE structural_biology.mygpt._doc_chunks_stage AS
 WITH body AS (
   -- keep substantive body text; drop headers themselves and tiny noise
   SELECT
@@ -95,8 +163,9 @@ chunks AS (
   GROUP BY doc_id, section, bucket
 )
 SELECT
-  concat(doc_id, '-',
-         conv(substr(md5(section), 1, 8), 16, 10), '-', bucket) AS chunk_id,
+  -- Stable key: path hash (01) + section hash + bucket. 64-bit section hash so two
+  -- sections of one document can't collide (a duplicate key would fail the MERGE).
+  concat(doc_id, '-', substr(md5(section), 1, 16), '-', bucket) AS chunk_id,
   doc_id,
   path,
   source_name,
@@ -108,7 +177,22 @@ SELECT
 FROM chunks
 WHERE length(chunk_text) >= 80;
 
--- 3) Per-dataset section catalogue (port of MyGPT PaperSections) — powers the
+-- 6) MERGE into the index source: only real changes touch the change feed.
+MERGE INTO structural_biology.mygpt.doc_chunks t
+USING structural_biology.mygpt._doc_chunks_stage s
+ON t.chunk_id = s.chunk_id
+WHEN MATCHED AND NOT (
+      t.chunk_text  <=> s.chunk_text
+  AND t.section     <=> s.section
+  AND t.page        <=> s.page
+  AND t.source_name <=> s.source_name
+  AND t.corpus      <=> s.corpus
+  AND t.path        <=> s.path
+) THEN UPDATE SET *
+WHEN NOT MATCHED THEN INSERT *
+WHEN NOT MATCHED BY SOURCE THEN DELETE;
+
+-- 7) Per-dataset section catalogue (port of MyGPT PaperSections) — powers the
 --    document/section focus selector and the agent's section validation.
 --    'mygpt' (the app's default, unfiltered view) spans every corpus; each corpus
 --    also gets its own rows so per-corpus focus selectors can list just its sections.
@@ -121,12 +205,22 @@ SELECT corpus AS dataset_name, section AS section_title, count(*) AS section_cou
 FROM structural_biology.mygpt.doc_chunks
 GROUP BY corpus, section;
 
--- 4) Vector Search endpoint + Delta Sync index (MANAGED embeddings via the custom
+-- 8) Drop per-run staging.
+DROP TABLE IF EXISTS structural_biology.mygpt._docs_in_scope;
+DROP TABLE IF EXISTS structural_biology.mygpt._docs_to_parse;
+DROP TABLE IF EXISTS structural_biology.mygpt._doc_elements_stage;
+DROP TABLE IF EXISTS structural_biology.mygpt._doc_chunks_stage;
+
+-- 9) Vector Search endpoint + Delta Sync index (MANAGED embeddings via the custom
 --    bge-m3 endpoint). `section` and (Phase 2) `corpus` are synced so the agent can
 --    filter on them. Adding a synced column requires a new index: Phase 2 created
 --    `doc_chunks_corpus_index` alongside the Phase-1 `doc_chunks_index` (no retrieval
---    downtime; the agent driver points at it via --vs-index-name). These
---    are CLI/API, not SQL. Recreate the index (embedding model + columns changed) then sync:
+--    downtime; the agent driver points at it via --vs-index-name). Index CREATION is
+--    a one-time CLI/API step (below); SYNCING after each run is the job's `sync_index`
+--    task, which waits for the sync and checks the indexed row count.
+--    If the index is ever deleted + recreated, REDEPLOY THE AGENT afterwards: its SELECT
+--    grant on the index comes from agents.deploy and doesn't carry over to a new index.
+--    And never CREATE OR REPLACE doc_chunks: a new table id breaks the index's sync.
 --
 --    NOTE (Phase 1b): AI Search managed embeddings call the MODEL endpoint `mygpt-bge-m3`
 --    directly here — NOT the `mygpt-embeddings` AI Gateway endpoint. AI Search rejects the
@@ -149,8 +243,6 @@ GROUP BY corpus, section;
 --        "columns_to_sync": ["chunk_id","doc_id","source_name","corpus","section","page","elem_type","chunk_text"]
 --      }
 --    }'
---
---    databricks vector-search-indexes sync-index structural_biology.mygpt.doc_chunks_corpus_index --profile mygpt
 --
 -- Index-metric note: calibrate embedding_model_cutoffs (workstream C) in the SAME
 -- distance space the agent uses (distance = 1 - cosine similarity returned by the index).

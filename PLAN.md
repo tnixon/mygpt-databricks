@@ -183,10 +183,33 @@ final flow — it fails AI Search validation; keep the index on `mygpt-bge-m3`.)
 - **build_datasets:** on Databricks, `create_dataset` rejects dataset-level tags, and it needs
   `databricks-agents` in the job env.
 
+### ETL made incremental (2026-10-12)
+- `documents.id = xxhash64(path)` replaces `monotonically_increasing_id()`, which wasn't
+  stable across runs.
+- `02` parses only new or changed files (`doc_parse_log`, keyed on size + mtime) and MERGEs
+  chunks into `doc_chunks`. The new `sync_index` task syncs `doc_chunks_corpus_index` and checks
+  its row count.
+- The first run after this change re-keys every chunk, so the index re-embeds everything once.
+- **Rollout (2026-10-12/13):**
+  - The first run's sync failed with `DIFFERENT_DELTA_TABLE_READ_BY_STREAMING_SOURCE`. An
+    earlier run of the *old* ETL had `CREATE OR REPLACE`d `doc_chunks` (new Delta table id)
+    after the index was built.
+  - The index was deleted and recreated (9,213 rows: biomed 665 / FR 1,788 / ES 2,563 /
+    kinase 4,197). That dropped the agent's SELECT grant on it, and the app returned
+    `PermissionDenied` until the agent was redeployed (**v11**). Both gotchas are now in
+    `etl/README.md`.
+  - Steady state verified on a re-run: nothing re-parsed, MERGE 0/0/0, `sync_index` passed
+    (9,213 = 9,213).
+- **v11 also pins `MLFLOW_EXPERIMENT_ID`** to the shared experiment, so production traces and
+  monitors now land there. Side effect: `mlflow.genai.to_predict_fn` won't copy an endpoint
+  trace that's already in the current experiment, and then hands evaluate() a root-only trace
+  with no RETRIEVER span. `run_eval.endpoint_predict_fn` now always copies the returned trace
+  instead (guarded for evaluate's no-op trace check).
+
 ### Still open
-- Redeploy the agent (v11) for the trace-experiment pin, then confirm app traces and monitor
-  assessments land in `/Shared/mygpt/mygpt-rag-agent`.
-- BlueSky: blocked on St. Jude's kinase PDFs and `expression_systems_list.csv`.
+- Confirm app traces receive monitor assessments in `/Shared/mygpt/mygpt-rag-agent`.
+- BlueSky: kinase PDFs indexed (91 files, all 81 eval papers); still waiting on
+  `expression_systems_list.csv` for Q11 vocabulary compliance.
 - llama / gptoss baselines (`mygpt_eval` matrix override via `jobs run-now`, see eval/README).
 
 ## Phase 3 — Production ingestion lane
