@@ -64,5 +64,5 @@ eval-corpus: ## Upload the Phase-2 eval corpora to the docs volume (PROFILE=<nam
 	  databricks fs cp -r --overwrite "$(KINASE_PDFS)" $(DOCS_VOLUME)/kinase_literature --profile $(PROFILE); \
 	else echo "KINASE_PDFS not set — skipping kinase_literature (St. Jude to provide the PDFs)"; fi
 
-eval-test: ## Unit-test the eval harness + agent scoring math (no workspace needed)
-	uv run --no-project --with-requirements eval/requirements.txt pytest -q eval/ agents/rag_agent/test_scoring.py
+eval-test: ## Unit-test the eval harness + agent scoring / provided-sources (no workspace needed)
+	uv run --no-project --with-requirements eval/requirements.txt pytest -q eval/ agents/rag_agent/test_scoring.py agents/rag_agent/test_provided_sources.py

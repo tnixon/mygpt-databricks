@@ -12,6 +12,23 @@ env:
     valueFrom: agent-endpoint
   - name: MYGPT_SCHEMA
     value: 'structural_biology.mygpt'
-  # Optional: set to a SQL warehouse id to enable the /api/sections focus selector.
+  # SQL warehouse for the governed section catalogue (/api/sections on corpus libraries).
   - name: MYGPT_WAREHOUSE_ID
-    value: ''
+    valueFrom: sql-warehouse
+  # Phase 4: Lakebase app state (libraries, upload index, history, feedback). PGHOST /
+  # PGDATABASE / PGUSER / PGSSLMODE are injected by the `postgres` resource.
+  - name: LAKEBASE_ENDPOINT
+    valueFrom: postgres
+  - name: MYGPT_PG_SCHEMA
+    value: 'mygpt'
+  # Unity AI Gateway embeddings endpoint (bge-m3) — embeds queries for upload-library search.
+  - name: MYGPT_EMBED_ENDPOINT
+    valueFrom: embeddings-endpoint
+  # Upload libraries: files land in this volume; the ingest job indexes them into Lakebase.
+  - name: MYGPT_UPLOAD_VOLUME
+    value: '/Volumes/structural_biology/mygpt/uploads'
+  - name: MYGPT_UPLOAD_JOB_ID
+    valueFrom: upload-job
+  # Shared MLflow experiment: user feedback becomes `user_rating` assessments on agent traces.
+  - name: MYGPT_EXPERIMENT_ID
+    valueFrom: experiment

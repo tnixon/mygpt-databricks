@@ -1,6 +1,26 @@
 bundle:
   name: st-jude-mygpt
 
+# Phase 4 values come from the platform bundle (repo-root databricks.yml):
+#   upload_job_id  ← `databricks bundle summary -p mygpt` (jobs.mygpt_upload_ingest), run at repo root
+#   experiment_id  ← `databricks experiments get-by-name /Shared/mygpt/mygpt-rag-agent -p mygpt`
+#   warehouse_id   ← the serverless SQL warehouse used by the ETL
+# The app was first created outside this bundle; bind it once before the first deploy:
+#   databricks bundle deployment bind app st-jude-mygpt -p mygpt
+variables:
+  warehouse_id:
+    description: SQL warehouse for the section catalogue (CAN_USE).
+    default: ""
+  upload_job_id:
+    description: Job id of mygpt_upload_ingest (platform bundle).
+    default: ""
+  experiment_id:
+    description: Experiment id of /Shared/mygpt/mygpt-rag-agent (feedback assessments).
+    default: ""
+  pg_branch:
+    description: Lakebase branch holding the app state.
+    default: projects/mygpt/branches/production
+
 resources:
   apps:
     app:
@@ -12,11 +32,15 @@ resources:
       lifecycle:
         started: true
 
-      # Run serving calls on behalf of the signed-in user (OBO).
+      # Run serving calls on behalf of the signed-in user (OBO); read their groups (SCIM /Me)
+      # for group-shared libraries.
       user_api_scopes:
         - serving.serving-endpoints
+        - iam.current-user:read
 
-      # FMAPI foundation-model endpoints (direct chat) + the MyGPT agent endpoint.
+      # FMAPI foundation-model endpoints (direct chat) + the MyGPT agent endpoint, and the
+      # Phase 4 state: Lakebase, the embeddings gateway, the uploads volume, the ingest job,
+      # the section-catalogue warehouse/table, and the shared experiment.
       resources:
         - name: serving-endpoint
           serving_endpoint:
@@ -34,6 +58,37 @@ resources:
           serving_endpoint:
             name: mygpt-rag-agent
             permission: CAN_QUERY
+        - name: embeddings-endpoint
+          serving_endpoint:
+            name: mygpt-embeddings
+            permission: CAN_QUERY
+        - name: postgres
+          postgres:
+            branch: ${var.pg_branch}
+            database: ${var.pg_branch}/databases/databricks-postgres
+            permission: CAN_CONNECT_AND_CREATE
+        - name: uploads-volume
+          uc_securable:
+            securable_full_name: structural_biology.mygpt.uploads
+            securable_type: VOLUME
+            permission: WRITE_VOLUME
+        - name: paper-sections
+          uc_securable:
+            securable_full_name: structural_biology.mygpt.paper_sections
+            securable_type: TABLE
+            permission: SELECT
+        - name: upload-job
+          job:
+            id: ${var.upload_job_id}
+            permission: CAN_MANAGE_RUN
+        - name: sql-warehouse
+          sql_warehouse:
+            id: ${var.warehouse_id}
+            permission: CAN_USE
+        - name: experiment
+          experiment:
+            experiment_id: ${var.experiment_id}
+            permission: CAN_EDIT
 
 targets:
   default:

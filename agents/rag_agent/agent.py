@@ -4,7 +4,9 @@ Deployed to its own Model Serving endpoint (Mosaic AI Agent Framework). Owns the
 full MyGPT-grade pipeline and returns the answer plus QRS / ARS / Hallucination-Index
 trust metrics and per-source scores via ``custom_outputs``:
 
-  1. retrieve   AI Search (ANN + hybrid) with document/section focus filters
+  1. retrieve   AI Search (ANN + hybrid) with document/section focus filters — or, for
+                Phase-4 upload libraries, the chunks the app already retrieved from
+                Lakebase under RLS (``custom_inputs.sources``; see sources_from_inputs)
   2. rerank     cross-encoder/qnli-electra-base (query <-> source relevance)
   3. QRS        semantic (per-model distance calibration) + BM25 + rerank
   4. generate   FMAPI chat (Claude / Llama / GPT-OSS)
@@ -329,14 +331,18 @@ class MyGPTRagAgent(ResponsesAgent):
         )
         return _parse_embeddings(resp, n=len(texts))
 
-    def _retrieve_traced(self, query: str, corpus: str | None, focus: dict, k: int) -> list[dict]:
+    def _retrieve_traced(
+        self, query: str, corpus: str | None, focus: dict, k: int, provided: list[dict] | None = None
+    ) -> list[dict]:
         """Run retrieval inside a RETRIEVER span whose outputs use MLflow's Document
         shape (page_content + metadata.doc_uri), so built-in judges
         (RetrievalGroundedness / RetrievalRelevance) can read the retrieved context off
-        the trace. Returns the raw source dicts the scoring pipeline works on."""
+        the trace. Returns the raw source dicts the scoring pipeline works on.
+        ``provided`` (upload libraries) skips AI Search but keeps the same span."""
         with mlflow.start_span(name="retrieve", span_type="RETRIEVER") as span:
-            span.set_inputs({"query": query, "corpus": corpus, "focus": focus, "k": k})
-            sources = self._retrieve(query, corpus, focus, k)
+            span.set_inputs({"query": query, "corpus": corpus, "focus": focus, "k": k,
+                             "provided": provided is not None})
+            sources = provided if provided is not None else self._retrieve(query, corpus, focus, k)
             span.set_outputs([
                 {
                     "page_content": s["context"],
@@ -495,24 +501,29 @@ class MyGPTRagAgent(ResponsesAgent):
         k = int(ci.get("k", 5))
         instructions = str(ci.get("instructions") or "")
         query = _last_user_text(request)
+        # Phase 4: upload libraries arrive pre-retrieved (the app searched Lakebase under RLS).
+        provided = sources_from_inputs(ci["sources"], k) if ci.get("sources") is not None else None
+        self._last_retrieve_error = None
         cfg = self._config(dataset)
         model_endpoint = MODEL_ALIASES.get(model_alias, MODEL_ALIASES["sonnet"])
         try:
             # Tags let eval runs and production monitoring slice traces per corpus/model.
             mlflow.update_current_trace(tags={
                 "mygpt.corpus": corpus or "all", "mygpt.dataset": dataset, "mygpt.model": model_endpoint,
+                "mygpt.retrieval": "provided" if provided is not None else "ai_search",
             })
         except Exception:  # noqa: BLE001  (no active trace, e.g. tracing disabled)
             pass
 
-        sources = self._retrieve_traced(query, corpus, focus, k)
+        sources = self._retrieve_traced(query, corpus, focus, k, provided)
+        trace_id = _active_trace_id()
         if not sources:
             item = self.create_text_output_item(
                 "I couldn't find anything relevant in the indexed documents.", str(uuid.uuid4())
             )
             return ResponsesAgentResponse(output=[item], custom_outputs={
                 "model": model_endpoint, "corpus": corpus,
-                "qrs": 0, "ars": 0, "hi_eq": 100, "hi_rf": None, "sources": [],
+                "qrs": 0, "ars": 0, "hi_eq": 100, "hi_rf": None, "sources": [], "trace_id": trace_id,
                 # Surface the caught retrieval error instead of silently returning [].
                 "retrieve_error": getattr(self, "_last_retrieve_error", None),
             })
@@ -530,6 +541,8 @@ class MyGPTRagAgent(ResponsesAgent):
             custom_outputs={
                 "model": model_endpoint, "corpus": corpus,
                 "qrs": qrs, "ars": ans["ars"], "hi_eq": ans["hi_eq"], "hi_rf": ans["hi_rf"],
+                # lets the app attach user feedback to this trace (Phase 4)
+                "trace_id": trace_id,
                 "sources": [
                     {
                         "source_name": s["source_name"], "corpus": s["corpus"], "section": s["section"], "page": s["page"],
@@ -540,6 +553,61 @@ class MyGPTRagAgent(ResponsesAgent):
                 ],
             },
         )
+
+
+MAX_PROVIDED_SOURCES = 10
+MAX_PROVIDED_CHARS = 4000
+
+
+def _clamp(value: Any, lo: float, hi: float) -> float:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return lo
+    return lo if v != v else min(hi, max(lo, v))  # NaN -> lo
+
+
+def sources_from_inputs(raw: Any, k: int) -> list[dict]:
+    """Pre-retrieved chunks (``custom_inputs.sources``) -> the exact source-dict shape
+    ``_retrieve`` builds from AI Search, so rerank / QRS / generate / ARS / HI run unchanged.
+
+    The app sends cosine ``similarity`` (pgvector) and a [0, 1] keyword ``bm25_score``
+    (normalized ts_rank_cd). Malformed entries are dropped; at most k (<= 10) are kept and
+    chunk text is truncated, since this input crosses the serving-endpoint boundary.
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("chunk_text") or item.get("context") or "").strip()
+        if not text:
+            continue
+        sim = round(_clamp(item.get("similarity"), -1.0, 1.0), 4)
+        page = item.get("page")
+        out.append({
+            "chunk_id": str(item.get("chunk_id") or ""),
+            "source_name": str(item.get("source_name") or ""),
+            "corpus": str(item.get("corpus") or ""),
+            "section": str(item.get("section") or ""),
+            "page": int(page) if isinstance(page, (int, float)) and not isinstance(page, bool) else None,
+            "context": text[:MAX_PROVIDED_CHARS],
+            "similarity": sim,
+            "vector_distance_raw": round(1.0 - sim, 4),
+            "bm25_score": round(_clamp(item.get("bm25_score"), 0.0, 1.0), 4),
+            "rank": len(out) + 1,
+        })
+        if len(out) >= max(1, min(int(k), MAX_PROVIDED_SOURCES)):
+            break
+    return out
+
+
+def _active_trace_id() -> str | None:
+    try:
+        return mlflow.get_active_trace_id()
+    except Exception:  # noqa: BLE001  (tracing disabled / older MLflow)
+        return None
 
 
 def _parse_embeddings(resp: Any, n: int) -> list[list[float]]:
