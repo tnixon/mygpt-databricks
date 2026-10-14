@@ -132,12 +132,17 @@ def _truthy(v) -> bool:
 
 
 def summarize(rows: list[dict], scored: list[dict]) -> dict[str, float]:
-    groups: dict[tuple[str, str], list[tuple[dict, dict]]] = {}
+    """Per (use case, config), and for BlueSky also per gold provenance (`sme` vs
+    `sme_realigned`), so a wrong realignment of St. Jude's shifted block would show up as a
+    lower agreement on that slice."""
+    groups: dict[tuple[str, ...], list[tuple[dict, dict]]] = {}
     for row, values in zip(rows, scored):
         groups.setdefault((row["use_case"], row["config"]), []).append((row, values))
+        if row.get("gold") in ("sme", "sme_realigned"):
+            groups.setdefault((row["use_case"], row["config"], row["gold"]), []).append((row, values))
     metrics: dict[str, float] = {}
-    for (use_case, config), items in groups.items():
-        prefix = f"mygpt_ref/{use_case}/{config}"
+    for group, items in groups.items():
+        prefix = "mygpt_ref/" + "/".join(group)
         sme = [r["sme"] for r, _ in items if r["sme"] is not None]
         if sme:
             metrics[f"{prefix}/sme_accuracy"] = sum(sme) / len(sme)

@@ -215,13 +215,14 @@ final flow — it fails AI Search validation; keep the index on `mygpt-bge-m3`.)
   `expression_systems_list.csv` for Q11 vocabulary compliance.
 - llama / gptoss baselines (`mygpt_eval` matrix override via `jobs run-now`, see eval/README).
 
-### Gold-answer evals (built 2026-10-13; baseline pending)
+### Gold-answer evals (built 2026-10-13; baselined 2026-10-14)
 These lift the "guidelines-only" and "public benchmarks deferred" limits for the data we
 already have. Details are in `eval/README.md`.
 - **SME gold from St. Jude's private ground truths** (`reference/MyGPT-evaluations-private-main`,
   gitignored). These go to the restricted `eval_private` UC volume via `make eval-private`.
   - **SJ Global:** 320 SME-labelled MyGPT answers (269 Correct / 51 Incorrect) give a yes/no
-    gold for every base question × policy. The Q6–10 variants inherit it.
+    gold for every base question × policy. The Q6–10 variants inherit the yes/no label only
+    (`gold_scope: label_only`).
     - New scorers: `yes_no_correct` and `gold_correctness` (Correctness against the Correct
       answers).
   - **BlueSky:** kinase ground truth, mapped onto Q11 / Q16v2 / Q17.
@@ -237,18 +238,45 @@ already have. Details are in `eval/README.md`.
   answers are scored with our gold scorers.
   - SME accuracy is the parity bar.
   - The kinase results (3 configs) measure how often our scorers agree with the SMEs.
-- **Gates:** the new metrics start as `null`. Set them just below the first baseline.
+- **Baseline** (agent v11, Sonnet, full datasets, 2026-10-14). "MyGPT" is MyGPT's own recorded
+  answers put through the same scorers (`mygpt_eval_reference`). For SJ Global it is the SMEs'
+  grading instead, since our policy gold is derived from those answers.
+
+  | Use case | Metric | Ours | MyGPT |
+  |---|---|---|---|
+  | SJ Global FR / ES | `yes_no_correct` (SME-labelled base questions) | 0.806 / 0.744 | 0.841 SME accuracy |
+  | | `yes_no_correct` (Q6–10 variants, inherited) | 0.660 / 0.540 | — |
+  | | `gold_correctness` | 0.759 / 0.672 | — |
+  | BlueSky | `expression_system_correct` (Q11) | 0.424 | 0.47–0.64 (ctx5 / strpre / ctx15) |
+  | | `figure_ref_match` (Q17) | 0.985 | 0.85–0.94 |
+  | | `gold_correctness` (Q16v2) | 0.603 | 0.53–0.65 |
+  | | SME accuracy, all 3 questions | — | 0.73–0.81 |
+  | BioASQ | `yes_no_correct` (76) | 0.908 | 0.934 (gpt-oss-20b) |
+  | | `factoid_match` (87) | 0.678 | 0.609 |
+  | | `gold_correctness` | 0.519 | 0.456 |
+
+  - **Scorer agreement with the SMEs** (on MyGPT's kinase answers): `figure_ref_match` 98–100%,
+    `expression_system_correct` 83–89% (realigned slice 77–86%), `gold_correctness` 75–84%.
+  - **Gaps vs MyGPT:**
+    - SJ Global yes/no is below the 0.841 bar, ES more than FR. The keyword-free variants drop a
+      further 15–20 points, so the answer depends on the hinted wording.
+    - Kinase Q11 (expression system) is the weakest kinase question, worst on the realigned rows
+      (0.371 vs 0.484 on `sme`).
+  - **Gates:** set just below the baseline in `eval/gates.yaml`. The lower of FR / ES is used for
+    SJ Global. The inherited slice stays informational (50 rows per language). All new gates
+    pass on the baseline runs. One existing gate failed: ES `retrieval_ok` = 0.995 (1 of 210
+    rows). This needs triage before `gate=true`.
 - **Still out of scope:**
   - PubMedQA (no PDFs).
   - QRS-ARS-cutoff (mostly PubMedQA, so cutoff recalibration is still open).
   - Open-RAG-Bench (PDFs not downloaded).
 - **Rollout:**
-  1. `make eval-private` and `make eval-corpus`.
-  2. `bundle deploy`, then `bundle run mygpt_etl`.
+  1. `bundle deploy` (creates the `eval_private` volume).
+  2. `make eval-private` and `make eval-corpus`, then `bundle run mygpt_etl`.
   3. `bundle run mygpt_eval_build_datasets`.
   4. `bundle run mygpt_eval_reference`.
   5. `mygpt_eval` smoke (`max_rows=5`), then a full run.
-  6. Set the gates, then re-run with `gate=true`.
+  6. Set the gates (done), then re-run with `gate=true`.
 
 ## Phase 4 — Stateful backbone (Lakebase)
 - **Goal:** multi-user, persistent, personalized state.

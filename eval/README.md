@@ -34,10 +34,16 @@ baseline run, and the endpoint's production traces + monitoring scorers.
 (`<scorer>/<gold>/mean`):
 - `sme`: labelled by St. Jude.
 - `inherited`: SJ Global Q6–10. These variants drop the keyword hints and reuse the base
-  question's gold.
+  question's **yes/no label only**. They're marked `gold_scope: label_only`, so the
+  correctness judge skips them: the base question's reference summary was written for the
+  hinted question.
 - `sme_realigned`: see below.
 - `benchmark`: BioASQ.
 - `none`: no gold. The gold scorers skip these rows.
+
+**Changing gold:** `merge_records` merges expectation keys into existing rows. It doesn't
+replace them, so deleting a key in a builder leaves the old value in the UC table. To retract
+gold, mark the row instead (as `gold_scope: label_only` does), or rebuild the dataset.
 
 **Data issue in St. Jude's kinase file (reported to them):**
 - In ids 129–262, the `question_id` / `ground_truth` cells sit one row too high relative to the
@@ -108,9 +114,9 @@ endpoint calls. It logs the following to one run, `mygpt-reference-baseline`:
 ## Run
 ```bash
 make eval-test                                                  # local unit tests
+databricks bundle deploy -p mygpt --var warehouse_id=<id>        # first: creates the eval_private volume
 make eval-corpus PROFILE=mygpt [KINASE_PDFS=<dir>]               # upload eval corpora (incl. BioASQ -> biomed)
 make eval-private PROFILE=mygpt                                  # private gold -> eval_private volume
-databricks bundle deploy -p mygpt --var warehouse_id=<id>
 databricks bundle run mygpt_etl -p mygpt --var warehouse_id=<id> # incremental parse + MERGE + index sync
 databricks bundle run mygpt_deploy_agent -p mygpt
 databricks bundle run mygpt_eval_build_datasets -p mygpt

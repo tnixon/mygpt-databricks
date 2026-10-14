@@ -135,6 +135,9 @@ def test_private_gold_join_yields():
         gold = [r["tags"]["gold"] for r in recs]
         assert gold.count("sme") == 16 * 10 and gold.count("inherited") == 5 * 10
         assert all(r["expectations"].get("expected_label") in ("yes", "no") for r in recs)
+        for r in recs:  # variants: label only
+            if r["tags"]["gold"] == "inherited":
+                assert r["expectations"]["gold_scope"] == "label_only" and "expected_response" not in r["expectations"]
     recs = eval_datasets.build_records("kinase_literature", REPO)
     assert len(eval_datasets.kinase_gold_rows(REPO)) == 282  # every (paper, kinase, question) once
     with_gold = [r for r in recs if r["tags"]["gold"] != "none"]
@@ -253,6 +256,11 @@ def test_expression_system_correct():
     assert _val(s.expression_system_correct(inputs=inputs, outputs=_out("['HEK293T']"), expectations=exp)) is True
     assert _val(s.expression_system_correct(inputs=inputs, outputs=_out("['Escherichia coli']"), expectations=exp)) is True
     assert _val(s.expression_system_correct(inputs=inputs, outputs=_out("['COS-7']"), expectations=exp)) is False
+    assert _val(s.expression_system_correct(inputs=inputs, outputs=_out("['Plat-E']"), expectations=exp)) is True
+    assert _val(s.expression_system_correct(inputs=inputs, outputs=_out("['BL21(DE3)']"), expectations=exp)) is True
+    insect = {"expected_values": ["SF21"]}
+    assert _val(s.expression_system_correct(inputs=inputs, outputs=_out("['insect cell']"), expectations=insect)) is True
+    assert _val(s.expression_system_correct(inputs=inputs, outputs=_out("['Sf9']"), expectations=insect)) is True
     assert _val(s.expression_system_correct(inputs=inputs, outputs=_out("no answer"), expectations=exp)) is False
     assert s.expression_system_correct(inputs=inputs, outputs=_out("['HEK293']"), expectations={}) is None
     assert s.expression_system_correct(inputs=_kinase_inputs("17"), outputs=_out("x"), expectations=exp) is None
@@ -288,6 +296,9 @@ def test_factoid_match():
 
 def test_gold_correctness_skips_without_gold():
     assert s.gold_correctness(inputs={"input": []}, outputs=_out("x"), expectations={"guidelines": ["g"]}) is None
+    # SJ Global variants inherit only the yes/no label, even if a stale expected_response survives
+    stale = {"expected_label": "yes", "expected_response": "Yes, ...", "gold_scope": "label_only"}
+    assert s.gold_correctness(inputs={"input": []}, outputs=_out("Yes"), expectations=stale) is None
 
 
 def test_scorer_sets_build():
@@ -366,6 +377,16 @@ def test_reference_summarize_agreement():
     assert m["mygpt_ref/bluesky/ctx5/expression_system_correct/agreement"] == 0.5
 
 
+def test_reference_summarize_splits_gold_provenance():
+    rows = [{"use_case": "bluesky", "config": "ctx5", "sme": True, "gold": "sme"},
+            {"use_case": "bluesky", "config": "ctx5", "sme": True, "gold": "sme_realigned"}]
+    scored = [{"expression_system_correct": True}, {"expression_system_correct": False}]
+    m = rb.summarize(rows, scored)
+    assert m["mygpt_ref/bluesky/ctx5/sme/expression_system_correct/agreement"] == 1.0
+    assert m["mygpt_ref/bluesky/ctx5/sme_realigned/expression_system_correct/agreement"] == 0.0
+    assert m["mygpt_ref/bluesky/ctx5/expression_system_correct/agreement"] == 0.5
+
+
 def test_reference_bioasq_rows_score_without_judge():
     rows = [r for r in rb.reference_rows(REPO) if r["use_case"] == "bioasq"]
     assert len(rows) == 163
@@ -387,5 +408,8 @@ def test_reference_kinase_rows():
 
 def test_bioasq_gates_skip_focus_adherence():
     gates = os.path.join(REPO, "eval", "gates.yaml")
-    assert run_eval.check_gates({"retrieval_ok/mean": 1.0, "safety/mean": 1.0}, "bioasq", gates) == []
-    assert run_eval.check_gates({"retrieval_ok/mean": 1.0}, "sj_global", gates)  # focus_adherence still enforced there
+    def focus_failures(use_case):
+        return [f for f in run_eval.check_gates({}, use_case, gates) if f.startswith("focus_adherence")]
+
+    assert focus_failures("bioasq") == []
+    assert focus_failures("sj_global")  # still enforced there

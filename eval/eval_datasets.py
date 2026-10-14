@@ -157,11 +157,16 @@ def health_policy_records(base_dir: str, corpus: str, source_sha: str = "") -> l
                 f"The response is written in English, even though the policy document is in {language}.",
             ]}
             # The SMEs labelled the base questions; a variant (Q6-10) is the same question
-            # minus the keyword hints, so it inherits the base question's gold.
+            # minus the keyword hints, so it inherits the base question's yes/no gold, but
+            # NOT its reference summary (written for the hinted question, it penalizes correct
+            # variant answers). `gold_scope` makes gold_correctness skip variants even if an
+            # older build's expected_response survives a merge_records upsert.
             g = gold.get((doc.removesuffix(".pdf"), q["question_key"]))
             if g:
                 expectations["expected_label"] = g["expected_label"]
-                if g["expected_response"]:
+                if variant == "yes":
+                    expectations["gold_scope"] = "label_only"
+                elif g["expected_response"]:
                     expectations["expected_response"] = g["expected_response"]
             records.append({
                 "inputs": _request(q["question"], corpus, doc),

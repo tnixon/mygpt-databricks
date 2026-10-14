@@ -265,19 +265,24 @@ def _norm(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(text).lower())
 
 
-# Expression-system spellings -> the canonical names the BlueSky SMEs used in the gold.
-_EXPRESSION_ALIASES = {
-    "hek293t": "hek293", "hek293cells": "hek293",
-    "cos1": "cos", "cos7": "cos", "coscells": "cos",
-    "escherichiacoli": "ecoli", "bl21de3": "ecoli", "bl21": "ecoli",
-    "sf21cells": "sf21", "sf9cells": "sf9",
-    "nih3t3cells": "nih3t3",
+# Expression systems are matched by FAMILY: the BlueSky SMEs accepted e.g. "insect cell"
+# for SF21 and Plat-E (a HEK293T-derived packaging line) for HEK293. Each family is a list
+# of normalized prefixes; anything unlisted is compared as-is.
+_EXPRESSION_FAMILIES = {
+    "hek293": ("hek293", "hek", "293t", "plate"),
+    "cos": ("cos",),
+    "ecoli": ("ecoli", "escherichiacoli", "bl21", "rosetta", "dh5"),
+    "insect": ("sf9", "sf21", "insect", "baculovirus", "hi5", "highfive", "tni"),
+    "nih3t3": ("nih3t3",),
 }
 
 
 def _expression_key(name: str) -> str:
     key = _norm(name)
-    return _EXPRESSION_ALIASES.get(key, key)
+    for family, prefixes in _EXPRESSION_FAMILIES.items():
+        if key.startswith(prefixes):
+            return family
+    return key
 
 
 def _answer_items(text: str) -> list[str]:
@@ -364,7 +369,7 @@ def gold_correctness(inputs, outputs, expectations) -> Feedback | None:
 
     exp = expectations or {}
     facts, response = exp.get("expected_facts"), exp.get("expected_response")
-    if not facts and not response:
+    if (not facts and not response) or exp.get("gold_scope") == "label_only":
         return None
     return is_correct(
         request=_question(inputs), response=answer_text(outputs),
