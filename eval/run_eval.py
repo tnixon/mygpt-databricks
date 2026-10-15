@@ -234,15 +234,19 @@ def coding_matrix(df, records: list[dict]):
     return pd.DataFrame(cells).pivot_table(index="document", columns="question", values="label", aggfunc="first")
 
 
-def check_gates(metrics: dict, use_case: str, gates_file: str) -> list[str]:
+def gates_for(use_case: str, gates_file: str) -> dict[str, float]:
+    """The enforced minimums for a use case: `shared` overlaid by the use case (null = off)."""
     import yaml
 
     with open(gates_file) as f:
         gates = yaml.safe_load(f) or {}
+    merged = {**(gates.get("shared") or {}), **(gates.get(use_case) or {})}
+    return {metric: minimum for metric, minimum in merged.items() if minimum is not None}
+
+
+def check_gates(metrics: dict, use_case: str, gates_file: str) -> list[str]:
     failures = []
-    for metric, minimum in {**(gates.get("shared") or {}), **(gates.get(use_case) or {})}.items():
-        if minimum is None:
-            continue
+    for metric, minimum in gates_for(use_case, gates_file).items():
         value = metrics.get(metric)
         if value is None:
             failures.append(f"{metric}: missing (gate >= {minimum})")
@@ -297,6 +301,9 @@ def main() -> None:
             "mygpt.eval.served_model": served or "", "mygpt.eval.git_sha": args.git_sha,
             "mygpt.eval.max_rows": str(args.max_rows),
         })
+        # The gates in force for this run, so the benchmarks dashboard can show pass / fail.
+        gates_file = os.path.join(base, "eval", "gates.yaml")
+        mlflow.log_params({f"gate/{m}": v for m, v in gates_for(spec.use_case, gates_file).items()})
         result = mlflow.genai.evaluate(
             data=data, predict_fn=predict_fn, scorers=sc.scorers_for(spec.use_case, vocab), model_id=model_id,
         )
@@ -323,7 +330,7 @@ def main() -> None:
         print(f"  {k}: {metrics[k]:.3f}" if isinstance(metrics[k], float) else f"  {k}: {metrics[k]}")
 
     if args.gate.strip().lower() == "true":
-        failures = check_gates(metrics, spec.use_case, os.path.join(base, "eval", "gates.yaml"))
+        failures = check_gates(metrics, spec.use_case, gates_file)
         if failures:
             print("GATE FAILED:\n  " + "\n  ".join(failures))
             sys.exit(1)

@@ -413,3 +413,10 @@ def test_bioasq_gates_skip_focus_adherence():
 
     assert focus_failures("bioasq") == []
     assert focus_failures("sj_global")  # still enforced there
+
+
+def test_gates_for_merges_shared_and_drops_null():
+    gates = run_eval.gates_for("bioasq", os.path.join(REPO, "eval", "gates.yaml"))
+    assert gates["retrieval_ok/mean"] == 1.0  # shared, re-stated
+    assert "focus_adherence/mean" not in gates  # nulled by the use case
+    assert None not in gates.values()

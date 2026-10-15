@@ -238,7 +238,7 @@ already have. Details are in `eval/README.md`.
   answers are scored with our gold scorers.
   - SME accuracy is the parity bar.
   - The kinase results (3 configs) measure how often our scorers agree with the SMEs.
-- **Baseline** (agent v11, Sonnet, full datasets, 2026-10-14). "MyGPT" is MyGPT's own recorded
+- **Baseline** (agent v12, Sonnet, full datasets, 2026-10-14). "MyGPT" is MyGPT's own recorded
   answers put through the same scorers (`mygpt_eval_reference`). For SJ Global it is the SMEs'
   grading instead, since our policy gold is derived from those answers.
 
@@ -262,6 +262,9 @@ already have. Details are in `eval/README.md`.
       further 15–20 points, so the answer depends on the hinted wording.
     - Kinase Q11 (expression system) is the weakest kinase question, worst on the realigned rows
       (0.371 vs 0.484 on `sme`).
+  - **Dashboard:** "[mygpt] Benchmarks — MyGPT vs Databricks agent" (bundle resource
+    `mygpt_benchmarks`; see `eval/README.md`). It reads the MLflow system tables, so it
+    updates after every eval run. Pages: scorecard, robustness & scorer trust, trend.
   - **Gates:** set just below the baseline in `eval/gates.yaml`. The lower of FR / ES is used for
     SJ Global. The inherited slice stays informational (50 rows per language). All new gates
     pass on the baseline runs. One existing gate failed: ES `retrieval_ok` = 0.995 (1 of 210

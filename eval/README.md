@@ -111,6 +111,23 @@ endpoint calls. It logs the following to one run, `mygpt-reference-baseline`:
 | BlueSky | `ctx5`, `ctx15`, `strpre` | SME accuracy + agreement for `expression_system_correct`, `figure_ref_match`, `gold_correctness` |
 | BioASQ | `gpt-oss-20b` | accuracy only (no SME labels) |
 
+## Benchmarks dashboard
+**"[mygpt] Benchmarks — MyGPT vs Databricks agent"** is an AI/BI dashboard, deployed with
+the root bundle (`resources.dashboards.mygpt_benchmarks`). It queries
+`system.mlflow.runs_latest` for this experiment directly, so it has no tables or jobs of its own.
+It refreshes on its own after every `mygpt_eval` / `mygpt_eval_reference` run.
+- **Scorecard:** each benchmark line is our latest **full** run (`max_rows = 0`) per dataset ×
+  LLM, set against MyGPT's figure. Δ is measured against MyGPT's best config; ±0.03 counts as on
+  par. Each row also shows its gate and the gate result. `run_eval` logs the gates in force as
+  `gate/<metric>` params, so runs from before 2026-10-15 show none.
+- **Robustness & trust:** SJ Global original vs reworded questions; each scorer's agreement
+  with the SMEs, by MyGPT config and gold slice; and BlueSky per question vs each MyGPT config.
+- **Trend:** headline gold and judge metrics for every full run, by agent version.
+
+To change it, edit `dashboards/sql/*.sql` and the layout in `dashboards/build_dashboard.py`, then
+run `python3 dashboards/build_dashboard.py` and `bundle deploy`. `sql/base.sql` holds the
+benchmark ↔ MyGPT-metric mapping. Don't hand-edit the generated `.lvdash.json`.
+
 ## Run
 ```bash
 make eval-test                                                  # local unit tests

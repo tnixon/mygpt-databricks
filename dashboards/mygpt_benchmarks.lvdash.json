@@ -1,0 +1,1824 @@
+{
+  "datasets": [
+    {
+      "name": "scorecard",
+      "displayName": "Scorecard: Databricks agent vs MyGPT",
+      "queryLines": [
+        "-- Shared CTEs, prepended to every dataset query by build_dashboard.py.\n",
+        "-- Source: MLflow's system tables (runs + their logged metrics) for the shared experiment.\n",
+        "WITH runs AS (\n",
+        "  SELECT r.run_id, r.experiment_id, r.run_name, r.start_time, r.tags, r.params, r.aggregated_metrics\n",
+        "  FROM system.mlflow.runs_latest r\n",
+        "  JOIN system.mlflow.experiments_latest e\n",
+        "    ON r.workspace_id = e.workspace_id AND r.experiment_id = e.experiment_id\n",
+        "  WHERE e.name = '/Shared/mygpt/mygpt-rag-agent' AND e.delete_time IS NULL\n",
+        "    AND r.delete_time IS NULL AND r.status = 'FINISHED'\n",
+        "),\n",
+        "metrics AS (\n",
+        "  SELECT run_id, run_name, start_time, tags, params, m.metric_name AS metric, m.latest_value AS value\n",
+        "  FROM runs LATERAL VIEW explode(aggregated_metrics) x AS m\n",
+        "),\n",
+        "-- One row per benchmark line of the comparison. `mygpt_rx` matches the reference run's\n",
+        "-- metric(s) for the same scorer: one per MyGPT config (3 for kinase), NULL = no MyGPT figure.\n",
+        "benchmarks AS (\n",
+        "  SELECT * FROM VALUES\n",
+        "    (1, 'sj_global', 'SJ Global', 'Yes/no vs SME gold (original wording)', 'yes_no_correct/sme/mean',\n",
+        "        '^mygpt_ref/sj_global/answer_1/sme_accuracy$', 'St. Jude SME accuracy of MyGPT answer_1'),\n",
+        "    (2, 'sj_global', 'SJ Global', 'Yes/no on reworded questions (Q6-10)', 'yes_no_correct/inherited/mean',\n",
+        "        CAST(NULL AS STRING), 'no MyGPT figure (variants were not SME-graded)'),\n",
+        "    (3, 'sj_global', 'SJ Global', 'Answer correctness (LLM judge)', 'gold_correctness/mean',\n",
+        "        CAST(NULL AS STRING), 'no MyGPT figure (gold is built from the MyGPT answers SMEs marked Correct)'),\n",
+        "    (4, 'bluesky', 'BlueSky kinase', 'Q11 expression system', 'expression_system_correct/mean',\n",
+        "        '^mygpt_ref/bluesky/(ctx5|ctx15|strpre)/expression_system_correct$', 'MyGPT ctx5 / ctx15 / strpre, same scorer'),\n",
+        "    (5, 'bluesky', 'BlueSky kinase', 'Q17 figure references', 'figure_ref_match/mean',\n",
+        "        '^mygpt_ref/bluesky/(ctx5|ctx15|strpre)/figure_ref_match$', 'MyGPT ctx5 / ctx15 / strpre, same scorer'),\n",
+        "    (6, 'bluesky', 'BlueSky kinase', 'Q16v2 assay type (LLM judge)', 'gold_correctness/mean',\n",
+        "        '^mygpt_ref/bluesky/(ctx5|ctx15|strpre)/gold_correctness$', 'MyGPT ctx5 / ctx15 / strpre, same judge'),\n",
+        "    (7, 'bioasq', 'BioASQ', 'Yes/no questions (76)', 'yes_no_correct/mean',\n",
+        "        '^mygpt_ref/bioasq/gpt-oss-20b/yes_no_correct$', 'MyGPT (gpt-oss-20b), same scorer'),\n",
+        "    (8, 'bioasq', 'BioASQ', 'Factoid questions (87)', 'factoid_match/mean',\n",
+        "        '^mygpt_ref/bioasq/gpt-oss-20b/factoid_match$', 'MyGPT (gpt-oss-20b), same scorer'),\n",
+        "    (9, 'bioasq', 'BioASQ', 'Answer correctness (LLM judge)', 'gold_correctness/mean',\n",
+        "        '^mygpt_ref/bioasq/gpt-oss-20b/gold_correctness$', 'MyGPT (gpt-oss-20b), same judge')\n",
+        "  AS b(sort, use_case, use_case_label, benchmark, ours_metric, mygpt_rx, mygpt_basis)\n",
+        "),\n",
+        "-- Our agent: full-dataset eval runs (max_rows = 0); rk = 1 is the latest per dataset x model.\n",
+        "ours AS (\n",
+        "  SELECT run_id, start_time, metric, value, params,\n",
+        "         tags['mygpt.eval.use_case'] AS use_case,\n",
+        "         tags['mygpt.eval.model_alias'] AS model_alias,\n",
+        "         CASE regexp_extract(tags['mygpt.eval.dataset'], '([a-z_]+)$', 1)\n",
+        "           WHEN 'eval_health_policies_fr' THEN 'SJ Global (FR)'\n",
+        "           WHEN 'eval_health_policies_es' THEN 'SJ Global (ES)'\n",
+        "           WHEN 'eval_kinase_literature' THEN 'BlueSky kinase'\n",
+        "           WHEN 'eval_bioasq' THEN 'BioASQ'\n",
+        "           ELSE tags['mygpt.eval.dataset'] END AS dataset_label,\n",
+        "         CAST(regexp_extract(tags['mygpt.eval.served_model'], '/([0-9]+)$', 1) AS INT) AS agent_version,\n",
+        "         dense_rank() OVER (PARTITION BY tags['mygpt.eval.dataset'], tags['mygpt.eval.model_alias']\n",
+        "                            ORDER BY start_time DESC) AS rk\n",
+        "  FROM metrics\n",
+        "  WHERE tags['mygpt.eval.use_case'] IS NOT NULL AND tags['mygpt.eval.max_rows'] = '0'\n",
+        "),\n",
+        "-- MyGPT: its recorded answers through our scorers (mygpt_eval_reference). Per metric, the\n",
+        "-- latest reference run that logged it (judge=false runs omit the LLM-judge metrics).\n",
+        "mygpt AS (\n",
+        "  SELECT metric, value, regexp_extract(metric, '^mygpt_ref/[^/]+/([^/]+)/', 1) AS config,\n",
+        "         row_number() OVER (PARTITION BY metric ORDER BY start_time DESC) AS rk\n",
+        "  FROM metrics\n",
+        "  WHERE tags['mygpt.eval.kind'] = 'reference'\n",
+        ")\n",
+        "-- One row per benchmark line x dataset (FR / ES are separate rows) x model alias.\n",
+        ", mygpt_by_benchmark AS (\n",
+        "  SELECT b.sort, min(m.value) AS mygpt_min, max(m.value) AS mygpt_best, count(*) AS n_configs,\n",
+        "         array_join(array_sort(collect_list(concat(m.config, ' ', format_number(m.value, 3)))), ', ') AS mygpt_configs\n",
+        "  FROM benchmarks b JOIN mygpt m ON m.rk = 1 AND m.metric RLIKE b.mygpt_rx\n",
+        "  GROUP BY b.sort\n",
+        "),\n",
+        "lines AS (\n",
+        "  SELECT b.sort, b.use_case_label, b.benchmark, b.mygpt_basis, o.dataset_label, o.model_alias,\n",
+        "         o.agent_version, o.start_time AS run_time, o.run_id, o.value AS ours,\n",
+        "         mb.mygpt_best, mb.mygpt_min, mb.n_configs, mb.mygpt_configs,\n",
+        "         CAST(o.params[concat('gate/', b.ours_metric)] AS DOUBLE) AS gate\n",
+        "  FROM benchmarks b\n",
+        "  JOIN ours o ON o.rk = 1 AND o.use_case = b.use_case AND o.metric = b.ours_metric\n",
+        "  LEFT JOIN mygpt_by_benchmark mb ON mb.sort = b.sort\n",
+        ")\n",
+        "SELECT sort, use_case_label, dataset_label, benchmark, model_alias, agent_version, run_time, run_id,\n",
+        "       round(ours, 3) AS ours,\n",
+        "       round(mygpt_best, 3) AS mygpt_best,\n",
+        "       CASE WHEN n_configs > 1 THEN concat(format_number(mygpt_min, 2), ' - ', format_number(mygpt_best, 2))\n",
+        "            ELSE format_number(mygpt_best, 3) END AS mygpt_range,\n",
+        "       mygpt_configs, mygpt_basis,\n",
+        "       round(ours - mygpt_best, 3) AS delta,\n",
+        "       CASE WHEN ours - mygpt_best > 0 THEN '+' ELSE '' END AS delta_sign,\n",
+        "       CASE WHEN mygpt_best IS NULL THEN '-'\n",
+        "            WHEN ours - mygpt_best > 0.03 THEN 'Better'\n",
+        "            WHEN ours - mygpt_best >= -0.03 THEN 'On par'\n",
+        "            ELSE 'Worse' END AS status,\n",
+        "       CAST(mygpt_best IS NOT NULL AND ours - mygpt_best >= -0.03 AS INT) AS is_at_or_above,\n",
+        "       CAST(mygpt_best IS NOT NULL AND ours - mygpt_best < -0.03 AS INT) AS is_below,\n",
+        "       gate,\n",
+        "       CASE WHEN gate IS NULL THEN '-' WHEN ours >= gate THEN 'Pass' ELSE 'Fail' END AS gate_status,\n",
+        "       CAST(gate IS NOT NULL AND ours >= gate AS INT) AS gate_passed,\n",
+        "       CAST(gate IS NOT NULL AS INT) AS gated,\n",
+        "       concat(dataset_label, ' | ', benchmark) AS line\n",
+        "FROM lines\n",
+        "ORDER BY sort, dataset_label\n"
+      ]
+    },
+    {
+      "name": "scorecard_long",
+      "displayName": "Scorecard (long form, for the grouped bar)",
+      "queryLines": [
+        "-- Shared CTEs, prepended to every dataset query by build_dashboard.py.\n",
+        "-- Source: MLflow's system tables (runs + their logged metrics) for the shared experiment.\n",
+        "WITH runs AS (\n",
+        "  SELECT r.run_id, r.experiment_id, r.run_name, r.start_time, r.tags, r.params, r.aggregated_metrics\n",
+        "  FROM system.mlflow.runs_latest r\n",
+        "  JOIN system.mlflow.experiments_latest e\n",
+        "    ON r.workspace_id = e.workspace_id AND r.experiment_id = e.experiment_id\n",
+        "  WHERE e.name = '/Shared/mygpt/mygpt-rag-agent' AND e.delete_time IS NULL\n",
+        "    AND r.delete_time IS NULL AND r.status = 'FINISHED'\n",
+        "),\n",
+        "metrics AS (\n",
+        "  SELECT run_id, run_name, start_time, tags, params, m.metric_name AS metric, m.latest_value AS value\n",
+        "  FROM runs LATERAL VIEW explode(aggregated_metrics) x AS m\n",
+        "),\n",
+        "-- One row per benchmark line of the comparison. `mygpt_rx` matches the reference run's\n",
+        "-- metric(s) for the same scorer: one per MyGPT config (3 for kinase), NULL = no MyGPT figure.\n",
+        "benchmarks AS (\n",
+        "  SELECT * FROM VALUES\n",
+        "    (1, 'sj_global', 'SJ Global', 'Yes/no vs SME gold (original wording)', 'yes_no_correct/sme/mean',\n",
+        "        '^mygpt_ref/sj_global/answer_1/sme_accuracy$', 'St. Jude SME accuracy of MyGPT answer_1'),\n",
+        "    (2, 'sj_global', 'SJ Global', 'Yes/no on reworded questions (Q6-10)', 'yes_no_correct/inherited/mean',\n",
+        "        CAST(NULL AS STRING), 'no MyGPT figure (variants were not SME-graded)'),\n",
+        "    (3, 'sj_global', 'SJ Global', 'Answer correctness (LLM judge)', 'gold_correctness/mean',\n",
+        "        CAST(NULL AS STRING), 'no MyGPT figure (gold is built from the MyGPT answers SMEs marked Correct)'),\n",
+        "    (4, 'bluesky', 'BlueSky kinase', 'Q11 expression system', 'expression_system_correct/mean',\n",
+        "        '^mygpt_ref/bluesky/(ctx5|ctx15|strpre)/expression_system_correct$', 'MyGPT ctx5 / ctx15 / strpre, same scorer'),\n",
+        "    (5, 'bluesky', 'BlueSky kinase', 'Q17 figure references', 'figure_ref_match/mean',\n",
+        "        '^mygpt_ref/bluesky/(ctx5|ctx15|strpre)/figure_ref_match$', 'MyGPT ctx5 / ctx15 / strpre, same scorer'),\n",
+        "    (6, 'bluesky', 'BlueSky kinase', 'Q16v2 assay type (LLM judge)', 'gold_correctness/mean',\n",
+        "        '^mygpt_ref/bluesky/(ctx5|ctx15|strpre)/gold_correctness$', 'MyGPT ctx5 / ctx15 / strpre, same judge'),\n",
+        "    (7, 'bioasq', 'BioASQ', 'Yes/no questions (76)', 'yes_no_correct/mean',\n",
+        "        '^mygpt_ref/bioasq/gpt-oss-20b/yes_no_correct$', 'MyGPT (gpt-oss-20b), same scorer'),\n",
+        "    (8, 'bioasq', 'BioASQ', 'Factoid questions (87)', 'factoid_match/mean',\n",
+        "        '^mygpt_ref/bioasq/gpt-oss-20b/factoid_match$', 'MyGPT (gpt-oss-20b), same scorer'),\n",
+        "    (9, 'bioasq', 'BioASQ', 'Answer correctness (LLM judge)', 'gold_correctness/mean',\n",
+        "        '^mygpt_ref/bioasq/gpt-oss-20b/gold_correctness$', 'MyGPT (gpt-oss-20b), same judge')\n",
+        "  AS b(sort, use_case, use_case_label, benchmark, ours_metric, mygpt_rx, mygpt_basis)\n",
+        "),\n",
+        "-- Our agent: full-dataset eval runs (max_rows = 0); rk = 1 is the latest per dataset x model.\n",
+        "ours AS (\n",
+        "  SELECT run_id, start_time, metric, value, params,\n",
+        "         tags['mygpt.eval.use_case'] AS use_case,\n",
+        "         tags['mygpt.eval.model_alias'] AS model_alias,\n",
+        "         CASE regexp_extract(tags['mygpt.eval.dataset'], '([a-z_]+)$', 1)\n",
+        "           WHEN 'eval_health_policies_fr' THEN 'SJ Global (FR)'\n",
+        "           WHEN 'eval_health_policies_es' THEN 'SJ Global (ES)'\n",
+        "           WHEN 'eval_kinase_literature' THEN 'BlueSky kinase'\n",
+        "           WHEN 'eval_bioasq' THEN 'BioASQ'\n",
+        "           ELSE tags['mygpt.eval.dataset'] END AS dataset_label,\n",
+        "         CAST(regexp_extract(tags['mygpt.eval.served_model'], '/([0-9]+)$', 1) AS INT) AS agent_version,\n",
+        "         dense_rank() OVER (PARTITION BY tags['mygpt.eval.dataset'], tags['mygpt.eval.model_alias']\n",
+        "                            ORDER BY start_time DESC) AS rk\n",
+        "  FROM metrics\n",
+        "  WHERE tags['mygpt.eval.use_case'] IS NOT NULL AND tags['mygpt.eval.max_rows'] = '0'\n",
+        "),\n",
+        "-- MyGPT: its recorded answers through our scorers (mygpt_eval_reference). Per metric, the\n",
+        "-- latest reference run that logged it (judge=false runs omit the LLM-judge metrics).\n",
+        "mygpt AS (\n",
+        "  SELECT metric, value, regexp_extract(metric, '^mygpt_ref/[^/]+/([^/]+)/', 1) AS config,\n",
+        "         row_number() OVER (PARTITION BY metric ORDER BY start_time DESC) AS rk\n",
+        "  FROM metrics\n",
+        "  WHERE tags['mygpt.eval.kind'] = 'reference'\n",
+        ")\n",
+        "-- Scorecard in long form (one row per line x system) for the grouped ours-vs-MyGPT bar.\n",
+        "SELECT b.sort, concat(o.dataset_label, ' | ', b.benchmark) AS line, o.model_alias,\n",
+        "       'Databricks agent' AS system, round(o.value, 3) AS score\n",
+        "FROM benchmarks b JOIN ours o ON o.rk = 1 AND o.use_case = b.use_case AND o.metric = b.ours_metric\n",
+        "WHERE b.mygpt_rx IS NOT NULL\n",
+        "UNION ALL\n",
+        "SELECT b.sort, concat(o.dataset_label, ' | ', b.benchmark), o.model_alias,\n",
+        "       'MyGPT (best config)', round(max(m.value), 3)\n",
+        "FROM benchmarks b\n",
+        "JOIN ours o ON o.rk = 1 AND o.use_case = b.use_case AND o.metric = b.ours_metric\n",
+        "JOIN mygpt m ON m.rk = 1 AND m.metric RLIKE b.mygpt_rx\n",
+        "GROUP BY b.sort, o.dataset_label, b.benchmark, o.model_alias\n"
+      ]
+    },
+    {
+      "name": "robustness",
+      "displayName": "SJ Global: original vs reworded questions",
+      "queryLines": [
+        "-- Shared CTEs, prepended to every dataset query by build_dashboard.py.\n",
+        "-- Source: MLflow's system tables (runs + their logged metrics) for the shared experiment.\n",
+        "WITH runs AS (\n",
+        "  SELECT r.run_id, r.experiment_id, r.run_name, r.start_time, r.tags, r.params, r.aggregated_metrics\n",
+        "  FROM system.mlflow.runs_latest r\n",
+        "  JOIN system.mlflow.experiments_latest e\n",
+        "    ON r.workspace_id = e.workspace_id AND r.experiment_id = e.experiment_id\n",
+        "  WHERE e.name = '/Shared/mygpt/mygpt-rag-agent' AND e.delete_time IS NULL\n",
+        "    AND r.delete_time IS NULL AND r.status = 'FINISHED'\n",
+        "),\n",
+        "metrics AS (\n",
+        "  SELECT run_id, run_name, start_time, tags, params, m.metric_name AS metric, m.latest_value AS value\n",
+        "  FROM runs LATERAL VIEW explode(aggregated_metrics) x AS m\n",
+        "),\n",
+        "-- One row per benchmark line of the comparison. `mygpt_rx` matches the reference run's\n",
+        "-- metric(s) for the same scorer: one per MyGPT config (3 for kinase), NULL = no MyGPT figure.\n",
+        "benchmarks AS (\n",
+        "  SELECT * FROM VALUES\n",
+        "    (1, 'sj_global', 'SJ Global', 'Yes/no vs SME gold (original wording)', 'yes_no_correct/sme/mean',\n",
+        "        '^mygpt_ref/sj_global/answer_1/sme_accuracy$', 'St. Jude SME accuracy of MyGPT answer_1'),\n",
+        "    (2, 'sj_global', 'SJ Global', 'Yes/no on reworded questions (Q6-10)', 'yes_no_correct/inherited/mean',\n",
+        "        CAST(NULL AS STRING), 'no MyGPT figure (variants were not SME-graded)'),\n",
+        "    (3, 'sj_global', 'SJ Global', 'Answer correctness (LLM judge)', 'gold_correctness/mean',\n",
+        "        CAST(NULL AS STRING), 'no MyGPT figure (gold is built from the MyGPT answers SMEs marked Correct)'),\n",
+        "    (4, 'bluesky', 'BlueSky kinase', 'Q11 expression system', 'expression_system_correct/mean',\n",
+        "        '^mygpt_ref/bluesky/(ctx5|ctx15|strpre)/expression_system_correct$', 'MyGPT ctx5 / ctx15 / strpre, same scorer'),\n",
+        "    (5, 'bluesky', 'BlueSky kinase', 'Q17 figure references', 'figure_ref_match/mean',\n",
+        "        '^mygpt_ref/bluesky/(ctx5|ctx15|strpre)/figure_ref_match$', 'MyGPT ctx5 / ctx15 / strpre, same scorer'),\n",
+        "    (6, 'bluesky', 'BlueSky kinase', 'Q16v2 assay type (LLM judge)', 'gold_correctness/mean',\n",
+        "        '^mygpt_ref/bluesky/(ctx5|ctx15|strpre)/gold_correctness$', 'MyGPT ctx5 / ctx15 / strpre, same judge'),\n",
+        "    (7, 'bioasq', 'BioASQ', 'Yes/no questions (76)', 'yes_no_correct/mean',\n",
+        "        '^mygpt_ref/bioasq/gpt-oss-20b/yes_no_correct$', 'MyGPT (gpt-oss-20b), same scorer'),\n",
+        "    (8, 'bioasq', 'BioASQ', 'Factoid questions (87)', 'factoid_match/mean',\n",
+        "        '^mygpt_ref/bioasq/gpt-oss-20b/factoid_match$', 'MyGPT (gpt-oss-20b), same scorer'),\n",
+        "    (9, 'bioasq', 'BioASQ', 'Answer correctness (LLM judge)', 'gold_correctness/mean',\n",
+        "        '^mygpt_ref/bioasq/gpt-oss-20b/gold_correctness$', 'MyGPT (gpt-oss-20b), same judge')\n",
+        "  AS b(sort, use_case, use_case_label, benchmark, ours_metric, mygpt_rx, mygpt_basis)\n",
+        "),\n",
+        "-- Our agent: full-dataset eval runs (max_rows = 0); rk = 1 is the latest per dataset x model.\n",
+        "ours AS (\n",
+        "  SELECT run_id, start_time, metric, value, params,\n",
+        "         tags['mygpt.eval.use_case'] AS use_case,\n",
+        "         tags['mygpt.eval.model_alias'] AS model_alias,\n",
+        "         CASE regexp_extract(tags['mygpt.eval.dataset'], '([a-z_]+)$', 1)\n",
+        "           WHEN 'eval_health_policies_fr' THEN 'SJ Global (FR)'\n",
+        "           WHEN 'eval_health_policies_es' THEN 'SJ Global (ES)'\n",
+        "           WHEN 'eval_kinase_literature' THEN 'BlueSky kinase'\n",
+        "           WHEN 'eval_bioasq' THEN 'BioASQ'\n",
+        "           ELSE tags['mygpt.eval.dataset'] END AS dataset_label,\n",
+        "         CAST(regexp_extract(tags['mygpt.eval.served_model'], '/([0-9]+)$', 1) AS INT) AS agent_version,\n",
+        "         dense_rank() OVER (PARTITION BY tags['mygpt.eval.dataset'], tags['mygpt.eval.model_alias']\n",
+        "                            ORDER BY start_time DESC) AS rk\n",
+        "  FROM metrics\n",
+        "  WHERE tags['mygpt.eval.use_case'] IS NOT NULL AND tags['mygpt.eval.max_rows'] = '0'\n",
+        "),\n",
+        "-- MyGPT: its recorded answers through our scorers (mygpt_eval_reference). Per metric, the\n",
+        "-- latest reference run that logged it (judge=false runs omit the LLM-judge metrics).\n",
+        "mygpt AS (\n",
+        "  SELECT metric, value, regexp_extract(metric, '^mygpt_ref/[^/]+/([^/]+)/', 1) AS config,\n",
+        "         row_number() OVER (PARTITION BY metric ORDER BY start_time DESC) AS rk\n",
+        "  FROM metrics\n",
+        "  WHERE tags['mygpt.eval.kind'] = 'reference'\n",
+        ")\n",
+        "-- SJ Global: the original (keyword-hinted) questions vs the reworded Q6-10 variants.\n",
+        "SELECT dataset_label, model_alias, agent_version,\n",
+        "       CASE metric WHEN 'yes_no_correct/sme/mean' THEN 'Original wording (SME-labelled)'\n",
+        "                   ELSE 'Reworded, no keyword hints (Q6-10)' END AS wording,\n",
+        "       round(value, 3) AS yes_no_correct\n",
+        "FROM ours\n",
+        "WHERE rk = 1 AND use_case = 'sj_global'\n",
+        "  AND metric IN ('yes_no_correct/sme/mean', 'yes_no_correct/inherited/mean')\n"
+      ]
+    },
+    {
+      "name": "kinase_configs",
+      "displayName": "BlueSky: agent vs each MyGPT config",
+      "queryLines": [
+        "-- Shared CTEs, prepended to every dataset query by build_dashboard.py.\n",
+        "-- Source: MLflow's system tables (runs + their logged metrics) for the shared experiment.\n",
+        "WITH runs AS (\n",
+        "  SELECT r.run_id, r.experiment_id, r.run_name, r.start_time, r.tags, r.params, r.aggregated_metrics\n",
+        "  FROM system.mlflow.runs_latest r\n",
+        "  JOIN system.mlflow.experiments_latest e\n",
+        "    ON r.workspace_id = e.workspace_id AND r.experiment_id = e.experiment_id\n",
+        "  WHERE e.name = '/Shared/mygpt/mygpt-rag-agent' AND e.delete_time IS NULL\n",
+        "    AND r.delete_time IS NULL AND r.status = 'FINISHED'\n",
+        "),\n",
+        "metrics AS (\n",
+        "  SELECT run_id, run_name, start_time, tags, params, m.metric_name AS metric, m.latest_value AS value\n",
+        "  FROM runs LATERAL VIEW explode(aggregated_metrics) x AS m\n",
+        "),\n",
+        "-- One row per benchmark line of the comparison. `mygpt_rx` matches the reference run's\n",
+        "-- metric(s) for the same scorer: one per MyGPT config (3 for kinase), NULL = no MyGPT figure.\n",
+        "benchmarks AS (\n",
+        "  SELECT * FROM VALUES\n",
+        "    (1, 'sj_global', 'SJ Global', 'Yes/no vs SME gold (original wording)', 'yes_no_correct/sme/mean',\n",
+        "        '^mygpt_ref/sj_global/answer_1/sme_accuracy$', 'St. Jude SME accuracy of MyGPT answer_1'),\n",
+        "    (2, 'sj_global', 'SJ Global', 'Yes/no on reworded questions (Q6-10)', 'yes_no_correct/inherited/mean',\n",
+        "        CAST(NULL AS STRING), 'no MyGPT figure (variants were not SME-graded)'),\n",
+        "    (3, 'sj_global', 'SJ Global', 'Answer correctness (LLM judge)', 'gold_correctness/mean',\n",
+        "        CAST(NULL AS STRING), 'no MyGPT figure (gold is built from the MyGPT answers SMEs marked Correct)'),\n",
+        "    (4, 'bluesky', 'BlueSky kinase', 'Q11 expression system', 'expression_system_correct/mean',\n",
+        "        '^mygpt_ref/bluesky/(ctx5|ctx15|strpre)/expression_system_correct$', 'MyGPT ctx5 / ctx15 / strpre, same scorer'),\n",
+        "    (5, 'bluesky', 'BlueSky kinase', 'Q17 figure references', 'figure_ref_match/mean',\n",
+        "        '^mygpt_ref/bluesky/(ctx5|ctx15|strpre)/figure_ref_match$', 'MyGPT ctx5 / ctx15 / strpre, same scorer'),\n",
+        "    (6, 'bluesky', 'BlueSky kinase', 'Q16v2 assay type (LLM judge)', 'gold_correctness/mean',\n",
+        "        '^mygpt_ref/bluesky/(ctx5|ctx15|strpre)/gold_correctness$', 'MyGPT ctx5 / ctx15 / strpre, same judge'),\n",
+        "    (7, 'bioasq', 'BioASQ', 'Yes/no questions (76)', 'yes_no_correct/mean',\n",
+        "        '^mygpt_ref/bioasq/gpt-oss-20b/yes_no_correct$', 'MyGPT (gpt-oss-20b), same scorer'),\n",
+        "    (8, 'bioasq', 'BioASQ', 'Factoid questions (87)', 'factoid_match/mean',\n",
+        "        '^mygpt_ref/bioasq/gpt-oss-20b/factoid_match$', 'MyGPT (gpt-oss-20b), same scorer'),\n",
+        "    (9, 'bioasq', 'BioASQ', 'Answer correctness (LLM judge)', 'gold_correctness/mean',\n",
+        "        '^mygpt_ref/bioasq/gpt-oss-20b/gold_correctness$', 'MyGPT (gpt-oss-20b), same judge')\n",
+        "  AS b(sort, use_case, use_case_label, benchmark, ours_metric, mygpt_rx, mygpt_basis)\n",
+        "),\n",
+        "-- Our agent: full-dataset eval runs (max_rows = 0); rk = 1 is the latest per dataset x model.\n",
+        "ours AS (\n",
+        "  SELECT run_id, start_time, metric, value, params,\n",
+        "         tags['mygpt.eval.use_case'] AS use_case,\n",
+        "         tags['mygpt.eval.model_alias'] AS model_alias,\n",
+        "         CASE regexp_extract(tags['mygpt.eval.dataset'], '([a-z_]+)$', 1)\n",
+        "           WHEN 'eval_health_policies_fr' THEN 'SJ Global (FR)'\n",
+        "           WHEN 'eval_health_policies_es' THEN 'SJ Global (ES)'\n",
+        "           WHEN 'eval_kinase_literature' THEN 'BlueSky kinase'\n",
+        "           WHEN 'eval_bioasq' THEN 'BioASQ'\n",
+        "           ELSE tags['mygpt.eval.dataset'] END AS dataset_label,\n",
+        "         CAST(regexp_extract(tags['mygpt.eval.served_model'], '/([0-9]+)$', 1) AS INT) AS agent_version,\n",
+        "         dense_rank() OVER (PARTITION BY tags['mygpt.eval.dataset'], tags['mygpt.eval.model_alias']\n",
+        "                            ORDER BY start_time DESC) AS rk\n",
+        "  FROM metrics\n",
+        "  WHERE tags['mygpt.eval.use_case'] IS NOT NULL AND tags['mygpt.eval.max_rows'] = '0'\n",
+        "),\n",
+        "-- MyGPT: its recorded answers through our scorers (mygpt_eval_reference). Per metric, the\n",
+        "-- latest reference run that logged it (judge=false runs omit the LLM-judge metrics).\n",
+        "mygpt AS (\n",
+        "  SELECT metric, value, regexp_extract(metric, '^mygpt_ref/[^/]+/([^/]+)/', 1) AS config,\n",
+        "         row_number() OVER (PARTITION BY metric ORDER BY start_time DESC) AS rk\n",
+        "  FROM metrics\n",
+        "  WHERE tags['mygpt.eval.kind'] = 'reference'\n",
+        ")\n",
+        "-- BlueSky per question: our agent vs each MyGPT configuration (same scorers), plus SME accuracy.\n",
+        "SELECT CASE b.ours_metric WHEN 'expression_system_correct/mean' THEN 'Q11 expression system'\n",
+        "                          WHEN 'figure_ref_match/mean' THEN 'Q17 figure references'\n",
+        "                          ELSE 'Q16v2 assay (LLM judge)' END AS question,\n",
+        "       concat('MyGPT ', m.config) AS system, round(m.value, 3) AS score\n",
+        "FROM benchmarks b JOIN mygpt m ON m.rk = 1 AND m.metric RLIKE b.mygpt_rx\n",
+        "WHERE b.use_case = 'bluesky'\n",
+        "UNION ALL\n",
+        "SELECT CASE b.ours_metric WHEN 'expression_system_correct/mean' THEN 'Q11 expression system'\n",
+        "                          WHEN 'figure_ref_match/mean' THEN 'Q17 figure references'\n",
+        "                          ELSE 'Q16v2 assay (LLM judge)' END,\n",
+        "       concat('Databricks agent (', o.model_alias, ')'), round(o.value, 3)\n",
+        "FROM benchmarks b JOIN ours o ON o.rk = 1 AND o.use_case = b.use_case AND o.metric = b.ours_metric\n",
+        "WHERE b.use_case = 'bluesky'\n"
+      ]
+    },
+    {
+      "name": "scorer_trust",
+      "displayName": "Scorer agreement with St. Jude SMEs",
+      "queryLines": [
+        "-- Shared CTEs, prepended to every dataset query by build_dashboard.py.\n",
+        "-- Source: MLflow's system tables (runs + their logged metrics) for the shared experiment.\n",
+        "WITH runs AS (\n",
+        "  SELECT r.run_id, r.experiment_id, r.run_name, r.start_time, r.tags, r.params, r.aggregated_metrics\n",
+        "  FROM system.mlflow.runs_latest r\n",
+        "  JOIN system.mlflow.experiments_latest e\n",
+        "    ON r.workspace_id = e.workspace_id AND r.experiment_id = e.experiment_id\n",
+        "  WHERE e.name = '/Shared/mygpt/mygpt-rag-agent' AND e.delete_time IS NULL\n",
+        "    AND r.delete_time IS NULL AND r.status = 'FINISHED'\n",
+        "),\n",
+        "metrics AS (\n",
+        "  SELECT run_id, run_name, start_time, tags, params, m.metric_name AS metric, m.latest_value AS value\n",
+        "  FROM runs LATERAL VIEW explode(aggregated_metrics) x AS m\n",
+        "),\n",
+        "-- One row per benchmark line of the comparison. `mygpt_rx` matches the reference run's\n",
+        "-- metric(s) for the same scorer: one per MyGPT config (3 for kinase), NULL = no MyGPT figure.\n",
+        "benchmarks AS (\n",
+        "  SELECT * FROM VALUES\n",
+        "    (1, 'sj_global', 'SJ Global', 'Yes/no vs SME gold (original wording)', 'yes_no_correct/sme/mean',\n",
+        "        '^mygpt_ref/sj_global/answer_1/sme_accuracy$', 'St. Jude SME accuracy of MyGPT answer_1'),\n",
+        "    (2, 'sj_global', 'SJ Global', 'Yes/no on reworded questions (Q6-10)', 'yes_no_correct/inherited/mean',\n",
+        "        CAST(NULL AS STRING), 'no MyGPT figure (variants were not SME-graded)'),\n",
+        "    (3, 'sj_global', 'SJ Global', 'Answer correctness (LLM judge)', 'gold_correctness/mean',\n",
+        "        CAST(NULL AS STRING), 'no MyGPT figure (gold is built from the MyGPT answers SMEs marked Correct)'),\n",
+        "    (4, 'bluesky', 'BlueSky kinase', 'Q11 expression system', 'expression_system_correct/mean',\n",
+        "        '^mygpt_ref/bluesky/(ctx5|ctx15|strpre)/expression_system_correct$', 'MyGPT ctx5 / ctx15 / strpre, same scorer'),\n",
+        "    (5, 'bluesky', 'BlueSky kinase', 'Q17 figure references', 'figure_ref_match/mean',\n",
+        "        '^mygpt_ref/bluesky/(ctx5|ctx15|strpre)/figure_ref_match$', 'MyGPT ctx5 / ctx15 / strpre, same scorer'),\n",
+        "    (6, 'bluesky', 'BlueSky kinase', 'Q16v2 assay type (LLM judge)', 'gold_correctness/mean',\n",
+        "        '^mygpt_ref/bluesky/(ctx5|ctx15|strpre)/gold_correctness$', 'MyGPT ctx5 / ctx15 / strpre, same judge'),\n",
+        "    (7, 'bioasq', 'BioASQ', 'Yes/no questions (76)', 'yes_no_correct/mean',\n",
+        "        '^mygpt_ref/bioasq/gpt-oss-20b/yes_no_correct$', 'MyGPT (gpt-oss-20b), same scorer'),\n",
+        "    (8, 'bioasq', 'BioASQ', 'Factoid questions (87)', 'factoid_match/mean',\n",
+        "        '^mygpt_ref/bioasq/gpt-oss-20b/factoid_match$', 'MyGPT (gpt-oss-20b), same scorer'),\n",
+        "    (9, 'bioasq', 'BioASQ', 'Answer correctness (LLM judge)', 'gold_correctness/mean',\n",
+        "        '^mygpt_ref/bioasq/gpt-oss-20b/gold_correctness$', 'MyGPT (gpt-oss-20b), same judge')\n",
+        "  AS b(sort, use_case, use_case_label, benchmark, ours_metric, mygpt_rx, mygpt_basis)\n",
+        "),\n",
+        "-- Our agent: full-dataset eval runs (max_rows = 0); rk = 1 is the latest per dataset x model.\n",
+        "ours AS (\n",
+        "  SELECT run_id, start_time, metric, value, params,\n",
+        "         tags['mygpt.eval.use_case'] AS use_case,\n",
+        "         tags['mygpt.eval.model_alias'] AS model_alias,\n",
+        "         CASE regexp_extract(tags['mygpt.eval.dataset'], '([a-z_]+)$', 1)\n",
+        "           WHEN 'eval_health_policies_fr' THEN 'SJ Global (FR)'\n",
+        "           WHEN 'eval_health_policies_es' THEN 'SJ Global (ES)'\n",
+        "           WHEN 'eval_kinase_literature' THEN 'BlueSky kinase'\n",
+        "           WHEN 'eval_bioasq' THEN 'BioASQ'\n",
+        "           ELSE tags['mygpt.eval.dataset'] END AS dataset_label,\n",
+        "         CAST(regexp_extract(tags['mygpt.eval.served_model'], '/([0-9]+)$', 1) AS INT) AS agent_version,\n",
+        "         dense_rank() OVER (PARTITION BY tags['mygpt.eval.dataset'], tags['mygpt.eval.model_alias']\n",
+        "                            ORDER BY start_time DESC) AS rk\n",
+        "  FROM metrics\n",
+        "  WHERE tags['mygpt.eval.use_case'] IS NOT NULL AND tags['mygpt.eval.max_rows'] = '0'\n",
+        "),\n",
+        "-- MyGPT: its recorded answers through our scorers (mygpt_eval_reference). Per metric, the\n",
+        "-- latest reference run that logged it (judge=false runs omit the LLM-judge metrics).\n",
+        "mygpt AS (\n",
+        "  SELECT metric, value, regexp_extract(metric, '^mygpt_ref/[^/]+/([^/]+)/', 1) AS config,\n",
+        "         row_number() OVER (PARTITION BY metric ORDER BY start_time DESC) AS rk\n",
+        "  FROM metrics\n",
+        "  WHERE tags['mygpt.eval.kind'] = 'reference'\n",
+        ")\n",
+        "-- How often each gold scorer agrees with St. Jude's SMEs, on MyGPT's kinase answers.\n",
+        ", agreement AS (\n",
+        "  SELECT regexp_extract(metric, '^mygpt_ref/bluesky/([^/]+)/', 1) AS config,\n",
+        "         coalesce(nullif(regexp_extract(metric, '/(sme|sme_realigned)/', 1), ''), 'all') AS gold_slice,\n",
+        "         regexp_extract(metric, '/([a-z_]+)/agreement$', 1) AS scorer,\n",
+        "         value AS agreement,\n",
+        "         regexp_replace(metric, '/agreement$', '/n') AS n_metric\n",
+        "  FROM mygpt WHERE rk = 1 AND metric RLIKE '^mygpt_ref/bluesky/.*/agreement$'\n",
+        ")\n",
+        "SELECT a.config, a.gold_slice, a.scorer,\n",
+        "       CASE a.scorer WHEN 'expression_system_correct' THEN 'Q11 expression system'\n",
+        "                     WHEN 'figure_ref_match' THEN 'Q17 figure references'\n",
+        "                     WHEN 'gold_correctness' THEN 'Q16v2 assay (LLM judge)' END AS question,\n",
+        "       concat(CASE a.scorer WHEN 'expression_system_correct' THEN 'Q11 expression'\n",
+        "                            WHEN 'figure_ref_match' THEN 'Q17 figures' ELSE 'Q16v2 assay (judge)' END,\n",
+        "              ' (', a.gold_slice, ')') AS label,\n",
+        "       round(a.agreement, 3) AS agreement, CAST(n.value AS INT) AS n\n",
+        "FROM agreement a LEFT JOIN mygpt n ON n.rk = 1 AND n.metric = a.n_metric\n",
+        "ORDER BY question, a.config, a.gold_slice\n"
+      ]
+    },
+    {
+      "name": "trend",
+      "displayName": "Headline metrics per full eval run",
+      "queryLines": [
+        "-- Shared CTEs, prepended to every dataset query by build_dashboard.py.\n",
+        "-- Source: MLflow's system tables (runs + their logged metrics) for the shared experiment.\n",
+        "WITH runs AS (\n",
+        "  SELECT r.run_id, r.experiment_id, r.run_name, r.start_time, r.tags, r.params, r.aggregated_metrics\n",
+        "  FROM system.mlflow.runs_latest r\n",
+        "  JOIN system.mlflow.experiments_latest e\n",
+        "    ON r.workspace_id = e.workspace_id AND r.experiment_id = e.experiment_id\n",
+        "  WHERE e.name = '/Shared/mygpt/mygpt-rag-agent' AND e.delete_time IS NULL\n",
+        "    AND r.delete_time IS NULL AND r.status = 'FINISHED'\n",
+        "),\n",
+        "metrics AS (\n",
+        "  SELECT run_id, run_name, start_time, tags, params, m.metric_name AS metric, m.latest_value AS value\n",
+        "  FROM runs LATERAL VIEW explode(aggregated_metrics) x AS m\n",
+        "),\n",
+        "-- One row per benchmark line of the comparison. `mygpt_rx` matches the reference run's\n",
+        "-- metric(s) for the same scorer: one per MyGPT config (3 for kinase), NULL = no MyGPT figure.\n",
+        "benchmarks AS (\n",
+        "  SELECT * FROM VALUES\n",
+        "    (1, 'sj_global', 'SJ Global', 'Yes/no vs SME gold (original wording)', 'yes_no_correct/sme/mean',\n",
+        "        '^mygpt_ref/sj_global/answer_1/sme_accuracy$', 'St. Jude SME accuracy of MyGPT answer_1'),\n",
+        "    (2, 'sj_global', 'SJ Global', 'Yes/no on reworded questions (Q6-10)', 'yes_no_correct/inherited/mean',\n",
+        "        CAST(NULL AS STRING), 'no MyGPT figure (variants were not SME-graded)'),\n",
+        "    (3, 'sj_global', 'SJ Global', 'Answer correctness (LLM judge)', 'gold_correctness/mean',\n",
+        "        CAST(NULL AS STRING), 'no MyGPT figure (gold is built from the MyGPT answers SMEs marked Correct)'),\n",
+        "    (4, 'bluesky', 'BlueSky kinase', 'Q11 expression system', 'expression_system_correct/mean',\n",
+        "        '^mygpt_ref/bluesky/(ctx5|ctx15|strpre)/expression_system_correct$', 'MyGPT ctx5 / ctx15 / strpre, same scorer'),\n",
+        "    (5, 'bluesky', 'BlueSky kinase', 'Q17 figure references', 'figure_ref_match/mean',\n",
+        "        '^mygpt_ref/bluesky/(ctx5|ctx15|strpre)/figure_ref_match$', 'MyGPT ctx5 / ctx15 / strpre, same scorer'),\n",
+        "    (6, 'bluesky', 'BlueSky kinase', 'Q16v2 assay type (LLM judge)', 'gold_correctness/mean',\n",
+        "        '^mygpt_ref/bluesky/(ctx5|ctx15|strpre)/gold_correctness$', 'MyGPT ctx5 / ctx15 / strpre, same judge'),\n",
+        "    (7, 'bioasq', 'BioASQ', 'Yes/no questions (76)', 'yes_no_correct/mean',\n",
+        "        '^mygpt_ref/bioasq/gpt-oss-20b/yes_no_correct$', 'MyGPT (gpt-oss-20b), same scorer'),\n",
+        "    (8, 'bioasq', 'BioASQ', 'Factoid questions (87)', 'factoid_match/mean',\n",
+        "        '^mygpt_ref/bioasq/gpt-oss-20b/factoid_match$', 'MyGPT (gpt-oss-20b), same scorer'),\n",
+        "    (9, 'bioasq', 'BioASQ', 'Answer correctness (LLM judge)', 'gold_correctness/mean',\n",
+        "        '^mygpt_ref/bioasq/gpt-oss-20b/gold_correctness$', 'MyGPT (gpt-oss-20b), same judge')\n",
+        "  AS b(sort, use_case, use_case_label, benchmark, ours_metric, mygpt_rx, mygpt_basis)\n",
+        "),\n",
+        "-- Our agent: full-dataset eval runs (max_rows = 0); rk = 1 is the latest per dataset x model.\n",
+        "ours AS (\n",
+        "  SELECT run_id, start_time, metric, value, params,\n",
+        "         tags['mygpt.eval.use_case'] AS use_case,\n",
+        "         tags['mygpt.eval.model_alias'] AS model_alias,\n",
+        "         CASE regexp_extract(tags['mygpt.eval.dataset'], '([a-z_]+)$', 1)\n",
+        "           WHEN 'eval_health_policies_fr' THEN 'SJ Global (FR)'\n",
+        "           WHEN 'eval_health_policies_es' THEN 'SJ Global (ES)'\n",
+        "           WHEN 'eval_kinase_literature' THEN 'BlueSky kinase'\n",
+        "           WHEN 'eval_bioasq' THEN 'BioASQ'\n",
+        "           ELSE tags['mygpt.eval.dataset'] END AS dataset_label,\n",
+        "         CAST(regexp_extract(tags['mygpt.eval.served_model'], '/([0-9]+)$', 1) AS INT) AS agent_version,\n",
+        "         dense_rank() OVER (PARTITION BY tags['mygpt.eval.dataset'], tags['mygpt.eval.model_alias']\n",
+        "                            ORDER BY start_time DESC) AS rk\n",
+        "  FROM metrics\n",
+        "  WHERE tags['mygpt.eval.use_case'] IS NOT NULL AND tags['mygpt.eval.max_rows'] = '0'\n",
+        "),\n",
+        "-- MyGPT: its recorded answers through our scorers (mygpt_eval_reference). Per metric, the\n",
+        "-- latest reference run that logged it (judge=false runs omit the LLM-judge metrics).\n",
+        "mygpt AS (\n",
+        "  SELECT metric, value, regexp_extract(metric, '^mygpt_ref/[^/]+/([^/]+)/', 1) AS config,\n",
+        "         row_number() OVER (PARTITION BY metric ORDER BY start_time DESC) AS rk\n",
+        "  FROM metrics\n",
+        "  WHERE tags['mygpt.eval.kind'] = 'reference'\n",
+        ")\n",
+        "-- Headline metrics of every full eval run, for the regression trend across agent versions.\n",
+        "SELECT o.start_time AS run_time, date_format(o.start_time, 'yyyy-MM-dd HH:mm') AS run_label,\n",
+        "       o.dataset_label, o.model_alias, o.agent_version, o.run_id,\n",
+        "       l.metric_label, concat(o.dataset_label, ' | ', l.metric_label) AS series,\n",
+        "       round(o.value, 3) AS score\n",
+        "FROM ours o\n",
+        "JOIN LATERAL (SELECT coalesce(b.benchmark, CASE o.metric\n",
+        "         WHEN 'retrieval_groundedness/mean' THEN 'Groundedness (judge)'\n",
+        "         WHEN 'relevance_to_query/mean' THEN 'Relevance to query (judge)'\n",
+        "         WHEN 'expectations_guidelines/mean' THEN 'Per-row guidelines (judge)'\n",
+        "         WHEN 'mygpt_grounding/mean' THEN 'MyGPT grounding (judge)' END) AS metric_label) l LEFT JOIN benchmarks b ON b.use_case = o.use_case AND b.ours_metric = o.metric\n",
+        "WHERE b.sort IS NOT NULL\n",
+        "   OR o.metric IN ('retrieval_groundedness/mean', 'relevance_to_query/mean',\n",
+        "                   'expectations_guidelines/mean', 'mygpt_grounding/mean')\n"
+      ]
+    },
+    {
+      "name": "runs",
+      "displayName": "Eval + reference runs",
+      "queryLines": [
+        "-- Shared CTEs, prepended to every dataset query by build_dashboard.py.\n",
+        "-- Source: MLflow's system tables (runs + their logged metrics) for the shared experiment.\n",
+        "WITH runs AS (\n",
+        "  SELECT r.run_id, r.experiment_id, r.run_name, r.start_time, r.tags, r.params, r.aggregated_metrics\n",
+        "  FROM system.mlflow.runs_latest r\n",
+        "  JOIN system.mlflow.experiments_latest e\n",
+        "    ON r.workspace_id = e.workspace_id AND r.experiment_id = e.experiment_id\n",
+        "  WHERE e.name = '/Shared/mygpt/mygpt-rag-agent' AND e.delete_time IS NULL\n",
+        "    AND r.delete_time IS NULL AND r.status = 'FINISHED'\n",
+        "),\n",
+        "metrics AS (\n",
+        "  SELECT run_id, run_name, start_time, tags, params, m.metric_name AS metric, m.latest_value AS value\n",
+        "  FROM runs LATERAL VIEW explode(aggregated_metrics) x AS m\n",
+        "),\n",
+        "-- One row per benchmark line of the comparison. `mygpt_rx` matches the reference run's\n",
+        "-- metric(s) for the same scorer: one per MyGPT config (3 for kinase), NULL = no MyGPT figure.\n",
+        "benchmarks AS (\n",
+        "  SELECT * FROM VALUES\n",
+        "    (1, 'sj_global', 'SJ Global', 'Yes/no vs SME gold (original wording)', 'yes_no_correct/sme/mean',\n",
+        "        '^mygpt_ref/sj_global/answer_1/sme_accuracy$', 'St. Jude SME accuracy of MyGPT answer_1'),\n",
+        "    (2, 'sj_global', 'SJ Global', 'Yes/no on reworded questions (Q6-10)', 'yes_no_correct/inherited/mean',\n",
+        "        CAST(NULL AS STRING), 'no MyGPT figure (variants were not SME-graded)'),\n",
+        "    (3, 'sj_global', 'SJ Global', 'Answer correctness (LLM judge)', 'gold_correctness/mean',\n",
+        "        CAST(NULL AS STRING), 'no MyGPT figure (gold is built from the MyGPT answers SMEs marked Correct)'),\n",
+        "    (4, 'bluesky', 'BlueSky kinase', 'Q11 expression system', 'expression_system_correct/mean',\n",
+        "        '^mygpt_ref/bluesky/(ctx5|ctx15|strpre)/expression_system_correct$', 'MyGPT ctx5 / ctx15 / strpre, same scorer'),\n",
+        "    (5, 'bluesky', 'BlueSky kinase', 'Q17 figure references', 'figure_ref_match/mean',\n",
+        "        '^mygpt_ref/bluesky/(ctx5|ctx15|strpre)/figure_ref_match$', 'MyGPT ctx5 / ctx15 / strpre, same scorer'),\n",
+        "    (6, 'bluesky', 'BlueSky kinase', 'Q16v2 assay type (LLM judge)', 'gold_correctness/mean',\n",
+        "        '^mygpt_ref/bluesky/(ctx5|ctx15|strpre)/gold_correctness$', 'MyGPT ctx5 / ctx15 / strpre, same judge'),\n",
+        "    (7, 'bioasq', 'BioASQ', 'Yes/no questions (76)', 'yes_no_correct/mean',\n",
+        "        '^mygpt_ref/bioasq/gpt-oss-20b/yes_no_correct$', 'MyGPT (gpt-oss-20b), same scorer'),\n",
+        "    (8, 'bioasq', 'BioASQ', 'Factoid questions (87)', 'factoid_match/mean',\n",
+        "        '^mygpt_ref/bioasq/gpt-oss-20b/factoid_match$', 'MyGPT (gpt-oss-20b), same scorer'),\n",
+        "    (9, 'bioasq', 'BioASQ', 'Answer correctness (LLM judge)', 'gold_correctness/mean',\n",
+        "        '^mygpt_ref/bioasq/gpt-oss-20b/gold_correctness$', 'MyGPT (gpt-oss-20b), same judge')\n",
+        "  AS b(sort, use_case, use_case_label, benchmark, ours_metric, mygpt_rx, mygpt_basis)\n",
+        "),\n",
+        "-- Our agent: full-dataset eval runs (max_rows = 0); rk = 1 is the latest per dataset x model.\n",
+        "ours AS (\n",
+        "  SELECT run_id, start_time, metric, value, params,\n",
+        "         tags['mygpt.eval.use_case'] AS use_case,\n",
+        "         tags['mygpt.eval.model_alias'] AS model_alias,\n",
+        "         CASE regexp_extract(tags['mygpt.eval.dataset'], '([a-z_]+)$', 1)\n",
+        "           WHEN 'eval_health_policies_fr' THEN 'SJ Global (FR)'\n",
+        "           WHEN 'eval_health_policies_es' THEN 'SJ Global (ES)'\n",
+        "           WHEN 'eval_kinase_literature' THEN 'BlueSky kinase'\n",
+        "           WHEN 'eval_bioasq' THEN 'BioASQ'\n",
+        "           ELSE tags['mygpt.eval.dataset'] END AS dataset_label,\n",
+        "         CAST(regexp_extract(tags['mygpt.eval.served_model'], '/([0-9]+)$', 1) AS INT) AS agent_version,\n",
+        "         dense_rank() OVER (PARTITION BY tags['mygpt.eval.dataset'], tags['mygpt.eval.model_alias']\n",
+        "                            ORDER BY start_time DESC) AS rk\n",
+        "  FROM metrics\n",
+        "  WHERE tags['mygpt.eval.use_case'] IS NOT NULL AND tags['mygpt.eval.max_rows'] = '0'\n",
+        "),\n",
+        "-- MyGPT: its recorded answers through our scorers (mygpt_eval_reference). Per metric, the\n",
+        "-- latest reference run that logged it (judge=false runs omit the LLM-judge metrics).\n",
+        "mygpt AS (\n",
+        "  SELECT metric, value, regexp_extract(metric, '^mygpt_ref/[^/]+/([^/]+)/', 1) AS config,\n",
+        "         row_number() OVER (PARTITION BY metric ORDER BY start_time DESC) AS rk\n",
+        "  FROM metrics\n",
+        "  WHERE tags['mygpt.eval.kind'] = 'reference'\n",
+        ")\n",
+        "-- Run list (full eval runs + reference runs) with links into the MLflow experiment.\n",
+        "SELECT start_time AS run_time, run_name,\n",
+        "       coalesce(tags['mygpt.eval.kind'], 'eval') AS kind,\n",
+        "       tags['mygpt.eval.model_alias'] AS model_alias,\n",
+        "       tags['mygpt.eval.served_model'] AS served_model,\n",
+        "       tags['mygpt.eval.max_rows'] AS max_rows,\n",
+        "       run_id,\n",
+        "       concat(tags['mlflow.databricks.workspaceURL'], '/ml/experiments/', experiment_id, '/runs/', run_id) AS run_url\n",
+        "FROM runs\n",
+        "WHERE tags['mygpt.eval.use_case'] IS NOT NULL OR tags['mygpt.eval.kind'] = 'reference'\n",
+        "ORDER BY start_time DESC\n"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "scorecard",
+      "displayName": "Scorecard",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layout": [
+        {
+          "widget": {
+            "name": "header",
+            "textbox_spec": "# MyGPT benchmarks: Databricks agent vs. MyGPT\n**Databricks agent** = the `mygpt-rag-agent` endpoint as served at its latest **full** eval run (`mygpt_eval`, every row of each dataset).\n**MyGPT** = the answers St. Jude's MyGPT recorded in *MyGPT-evaluations*, put through **the same scorers** (`mygpt_eval_reference`; nothing is regenerated).\nScores are accuracies (0-1). **Δ** = ours − MyGPT's best configuration; within ±0.03 counts as *on par*."
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "c_at_or_above",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "scorecard",
+                  "disaggregated": false,
+                  "fields": [
+                    {
+                      "name": "sum(is_at_or_above)",
+                      "expression": "SUM(`is_at_or_above`)"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(is_at_or_above)",
+                  "displayName": "Benchmarks at or above MyGPT"
+                }
+              },
+              "frame": {
+                "title": "Benchmarks at or above MyGPT",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 3,
+            "width": 1,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "c_below",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "scorecard",
+                  "disaggregated": false,
+                  "fields": [
+                    {
+                      "name": "sum(is_below)",
+                      "expression": "SUM(`is_below`)"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(is_below)",
+                  "displayName": "Benchmarks below MyGPT"
+                }
+              },
+              "frame": {
+                "title": "Benchmarks below MyGPT",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 1,
+            "y": 3,
+            "width": 1,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "c_gates_passed",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "scorecard",
+                  "disaggregated": false,
+                  "fields": [
+                    {
+                      "name": "sum(gate_passed)",
+                      "expression": "SUM(`gate_passed`)"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(gate_passed)",
+                  "displayName": "Gates passing"
+                }
+              },
+              "frame": {
+                "title": "Gates passing",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 3,
+            "width": 1,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "c_gated",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "scorecard",
+                  "disaggregated": false,
+                  "fields": [
+                    {
+                      "name": "sum(gated)",
+                      "expression": "SUM(`gated`)"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(gated)",
+                  "displayName": "Gated metrics"
+                }
+              },
+              "frame": {
+                "title": "Gated metrics",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 3,
+            "width": 1,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "f_model",
+            "queries": [
+              {
+                "name": "f_scorecard",
+                "query": {
+                  "datasetName": "scorecard",
+                  "disaggregated": false,
+                  "fields": [
+                    {
+                      "name": "model_alias",
+                      "expression": "`model_alias`"
+                    }
+                  ]
+                }
+              },
+              {
+                "name": "f_scorecard_long",
+                "query": {
+                  "datasetName": "scorecard_long",
+                  "disaggregated": false,
+                  "fields": [
+                    {
+                      "name": "model_alias",
+                      "expression": "`model_alias`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-single-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "model_alias",
+                    "displayName": "Agent LLM",
+                    "queryName": "f_scorecard"
+                  },
+                  {
+                    "fieldName": "model_alias",
+                    "displayName": "Agent LLM",
+                    "queryName": "f_scorecard_long"
+                  }
+                ]
+              },
+              "frame": {
+                "title": "Agent LLM",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 3,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "t_scorecard",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "scorecard",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "name": "use_case_label",
+                      "expression": "`use_case_label`"
+                    },
+                    {
+                      "name": "dataset_label",
+                      "expression": "`dataset_label`"
+                    },
+                    {
+                      "name": "benchmark",
+                      "expression": "`benchmark`"
+                    },
+                    {
+                      "name": "ours",
+                      "expression": "`ours`"
+                    },
+                    {
+                      "name": "mygpt_range",
+                      "expression": "`mygpt_range`"
+                    },
+                    {
+                      "name": "delta",
+                      "expression": "`delta`"
+                    },
+                    {
+                      "name": "status",
+                      "expression": "`status`"
+                    },
+                    {
+                      "name": "gate",
+                      "expression": "`gate`"
+                    },
+                    {
+                      "name": "gate_status",
+                      "expression": "`gate_status`"
+                    },
+                    {
+                      "name": "mygpt_configs",
+                      "expression": "`mygpt_configs`"
+                    },
+                    {
+                      "name": "mygpt_basis",
+                      "expression": "`mygpt_basis`"
+                    },
+                    {
+                      "name": "agent_version",
+                      "expression": "`agent_version`"
+                    },
+                    {
+                      "name": "model_alias",
+                      "expression": "`model_alias`"
+                    },
+                    {
+                      "name": "delta_sign",
+                      "expression": "`delta_sign`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "use_case_label",
+                    "displayName": "Use case"
+                  },
+                  {
+                    "fieldName": "dataset_label",
+                    "displayName": "Dataset"
+                  },
+                  {
+                    "fieldName": "benchmark",
+                    "displayName": "Benchmark"
+                  },
+                  {
+                    "fieldName": "ours",
+                    "displayName": "Databricks agent",
+                    "format": {
+                      "type": "number-plain",
+                      "abbreviation": "none",
+                      "decimalPlaces": {
+                        "type": "exact",
+                        "places": 3
+                      }
+                    }
+                  },
+                  {
+                    "fieldName": "mygpt_range",
+                    "displayName": "MyGPT"
+                  },
+                  {
+                    "fieldName": "delta",
+                    "displayName": "Δ vs MyGPT best",
+                    "format": {
+                      "type": "number-plain",
+                      "abbreviation": "none",
+                      "decimalPlaces": {
+                        "type": "exact",
+                        "places": 3
+                      }
+                    },
+                    "formatTemplate": "{{ delta_sign }}{{ @formatted }}",
+                    "style": {
+                      "type": "basic",
+                      "rules": [
+                        {
+                          "condition": {
+                            "operator": "=",
+                            "fieldName": "status",
+                            "operand": {
+                              "type": "data-value",
+                              "value": "Better"
+                            }
+                          },
+                          "backgroundColor": "#C8E6C9"
+                        },
+                        {
+                          "condition": {
+                            "operator": "=",
+                            "fieldName": "status",
+                            "operand": {
+                              "type": "data-value",
+                              "value": "On par"
+                            }
+                          },
+                          "backgroundColor": "#FFF3C4"
+                        },
+                        {
+                          "condition": {
+                            "operator": "=",
+                            "fieldName": "status",
+                            "operand": {
+                              "type": "data-value",
+                              "value": "Worse"
+                            }
+                          },
+                          "backgroundColor": "#FFCDD2"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "fieldName": "status",
+                    "displayName": "Status",
+                    "style": {
+                      "type": "basic",
+                      "rules": [
+                        {
+                          "condition": {
+                            "operator": "=",
+                            "fieldName": "status",
+                            "operand": {
+                              "type": "data-value",
+                              "value": "Better"
+                            }
+                          },
+                          "backgroundColor": "#C8E6C9"
+                        },
+                        {
+                          "condition": {
+                            "operator": "=",
+                            "fieldName": "status",
+                            "operand": {
+                              "type": "data-value",
+                              "value": "On par"
+                            }
+                          },
+                          "backgroundColor": "#FFF3C4"
+                        },
+                        {
+                          "condition": {
+                            "operator": "=",
+                            "fieldName": "status",
+                            "operand": {
+                              "type": "data-value",
+                              "value": "Worse"
+                            }
+                          },
+                          "backgroundColor": "#FFCDD2"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "fieldName": "gate",
+                    "displayName": "Gate",
+                    "format": {
+                      "type": "number-plain",
+                      "abbreviation": "none",
+                      "decimalPlaces": {
+                        "type": "exact",
+                        "places": 2
+                      }
+                    }
+                  },
+                  {
+                    "fieldName": "gate_status",
+                    "displayName": "Gate result",
+                    "style": {
+                      "type": "basic",
+                      "rules": [
+                        {
+                          "condition": {
+                            "operator": "=",
+                            "fieldName": "gate_status",
+                            "operand": {
+                              "type": "data-value",
+                              "value": "Pass"
+                            }
+                          },
+                          "backgroundColor": "#C8E6C9"
+                        },
+                        {
+                          "condition": {
+                            "operator": "=",
+                            "fieldName": "gate_status",
+                            "operand": {
+                              "type": "data-value",
+                              "value": "Fail"
+                            }
+                          },
+                          "backgroundColor": "#FFCDD2"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "fieldName": "mygpt_configs",
+                    "displayName": "MyGPT by config"
+                  },
+                  {
+                    "fieldName": "mygpt_basis",
+                    "displayName": "MyGPT figure is"
+                  },
+                  {
+                    "fieldName": "agent_version",
+                    "displayName": "Agent version"
+                  },
+                  {
+                    "fieldName": "model_alias",
+                    "displayName": "LLM"
+                  }
+                ]
+              },
+              "frame": {
+                "title": "Scorecard",
+                "showTitle": true
+              },
+              "data": {
+                "queryName": "main_query"
+              },
+              "freezeUpToColumnNumber": 3
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 6,
+            "width": 6,
+            "height": 9
+          }
+        },
+        {
+          "widget": {
+            "name": "b_compare",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "scorecard_long",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "name": "score",
+                      "expression": "`score`"
+                    },
+                    {
+                      "name": "line",
+                      "expression": "`line`"
+                    },
+                    {
+                      "name": "system",
+                      "expression": "`system`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "score",
+                  "scale": {
+                    "type": "quantitative",
+                    "domain": {
+                      "min": 0,
+                      "max": 1
+                    }
+                  },
+                  "displayName": "Score"
+                },
+                "y": {
+                  "fieldName": "line",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Benchmark"
+                },
+                "color": {
+                  "fieldName": "system",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "System"
+                }
+              },
+              "frame": {
+                "title": "Databricks agent vs MyGPT (best config)",
+                "showTitle": true
+              },
+              "mark": {
+                "layout": "group"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 15,
+            "width": 3,
+            "height": 10
+          }
+        },
+        {
+          "widget": {
+            "name": "b_delta",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "scorecard",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "name": "delta",
+                      "expression": "`delta`"
+                    },
+                    {
+                      "name": "line",
+                      "expression": "`line`"
+                    },
+                    {
+                      "name": "status",
+                      "expression": "`status`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "delta",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Δ"
+                },
+                "y": {
+                  "fieldName": "line",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Benchmark"
+                },
+                "color": {
+                  "fieldName": "status",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Status"
+                }
+              },
+              "frame": {
+                "title": "Δ vs MyGPT (positive = Databricks agent ahead)",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 15,
+            "width": 3,
+            "height": 10
+          }
+        },
+        {
+          "widget": {
+            "name": "how_to_read",
+            "textbox_spec": "### How to read this\n- **SJ Global (health policies, FR / ES):** MyGPT's bar is **St. Jude's SME grading** of MyGPT's `answer_1`. Our yes/no gold is *derived from* those answers (flipped where the SMEs marked them Incorrect), so MyGPT is not re-scored against it. The reworded questions (Q6-10) and the correctness judge have no MyGPT figure.\n- **BlueSky (kinase literature):** MyGPT ran three configurations (5 or 15 context chunks, structured pre-prompt); the table shows their range and Δ is against the best. About half the kinase gold comes from a block of St. Jude's file that was shifted by one row and has been realigned (see *Robustness & trust*).\n- **BioASQ (public benchmark, 163 questions over all 397 papers):** MyGPT's figure is its gpt-oss-20b run.\n- Rows marked *(LLM judge)* use MLflow's correctness judge, which agrees with St. Jude's SMEs 75-84% of the time; treat ±0.05 differences there as noise. The code scorers agree 83-100%.\n- **Gate** = the minimum the CI eval enforces for this metric (`eval/gates.yaml`); shown once a run has logged its gates."
+          },
+          "position": {
+            "x": 0,
+            "y": 25,
+            "width": 6,
+            "height": 6
+          }
+        }
+      ]
+    },
+    {
+      "name": "robustness_trust",
+      "displayName": "Robustness & trust",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layout": [
+        {
+          "widget": {
+            "name": "robustness_md",
+            "textbox_spec": "### Robustness: does the answer depend on the wording?\nSJ Global questions Q6-10 repeat a base question **without its keyword hints**, and inherit the base question's yes/no gold. A large drop means the agent leans on the hinted vocabulary rather than the policy's meaning."
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 3,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "trust_md",
+            "textbox_spec": "### Can the scorers be trusted?\nEach gold scorer was run on MyGPT's own kinase answers and compared with St. Jude's SME Correct / Incorrect labels.\n**≥ 0.85 agreement**: reliable enough to gate on. **< 0.80**: read as indicative only.\n`sme` = gold as St. Jude recorded it; `sme_realigned` = gold repaired from the shifted block of their file (agreement there validates the realignment)."
+          },
+          "position": {
+            "x": 3,
+            "y": 0,
+            "width": 3,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "b_robustness",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "robustness",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "name": "dataset_label",
+                      "expression": "`dataset_label`"
+                    },
+                    {
+                      "name": "yes_no_correct",
+                      "expression": "`yes_no_correct`"
+                    },
+                    {
+                      "name": "wording",
+                      "expression": "`wording`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "dataset_label",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Dataset"
+                },
+                "y": {
+                  "fieldName": "yes_no_correct",
+                  "scale": {
+                    "type": "quantitative",
+                    "domain": {
+                      "min": 0,
+                      "max": 1
+                    }
+                  },
+                  "displayName": "Yes/no correct"
+                },
+                "color": {
+                  "fieldName": "wording",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Question wording"
+                }
+              },
+              "frame": {
+                "title": "SJ Global yes/no: original vs reworded",
+                "showTitle": true
+              },
+              "mark": {
+                "layout": "group"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 3,
+            "width": 3,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "b_trust",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "scorer_trust",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "name": "agreement",
+                      "expression": "`agreement`"
+                    },
+                    {
+                      "name": "label",
+                      "expression": "`label`"
+                    },
+                    {
+                      "name": "config",
+                      "expression": "`config`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "agreement",
+                  "scale": {
+                    "type": "quantitative",
+                    "domain": {
+                      "min": 0,
+                      "max": 1
+                    }
+                  },
+                  "displayName": "Agreement"
+                },
+                "y": {
+                  "fieldName": "label",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Scorer (gold slice)"
+                },
+                "color": {
+                  "fieldName": "config",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "MyGPT config"
+                }
+              },
+              "frame": {
+                "title": "Scorer agreement with SMEs, by MyGPT config",
+                "showTitle": true
+              },
+              "mark": {
+                "layout": "group"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 3,
+            "width": 3,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "b_kinase",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "kinase_configs",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "name": "question",
+                      "expression": "`question`"
+                    },
+                    {
+                      "name": "score",
+                      "expression": "`score`"
+                    },
+                    {
+                      "name": "system",
+                      "expression": "`system`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "question",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Question"
+                },
+                "y": {
+                  "fieldName": "score",
+                  "scale": {
+                    "type": "quantitative",
+                    "domain": {
+                      "min": 0,
+                      "max": 1
+                    }
+                  },
+                  "displayName": "Score"
+                },
+                "color": {
+                  "fieldName": "system",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "System"
+                }
+              },
+              "frame": {
+                "title": "BlueSky per question: Databricks agent vs each MyGPT config",
+                "showTitle": true
+              },
+              "mark": {
+                "layout": "group"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 11,
+            "width": 6,
+            "height": 8
+          }
+        }
+      ]
+    },
+    {
+      "name": "trend",
+      "displayName": "Trend",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layout": [
+        {
+          "widget": {
+            "name": "trend_md",
+            "textbox_spec": "### Trend across agent versions\nEvery **full** eval run (smoke runs with `max_rows` > 0 are excluded). Gold metrics start at agent v12; the judge metrics go back to v9.\nUse the filters to pick a dataset and metrics."
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "f_trend_dataset",
+            "queries": [
+              {
+                "name": "f_trend",
+                "query": {
+                  "datasetName": "trend",
+                  "disaggregated": false,
+                  "fields": [
+                    {
+                      "name": "dataset_label",
+                      "expression": "`dataset_label`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "dataset_label",
+                    "displayName": "Dataset",
+                    "queryName": "f_trend"
+                  }
+                ]
+              },
+              "frame": {
+                "title": "Dataset",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "f_trend_metric",
+            "queries": [
+              {
+                "name": "f_trend",
+                "query": {
+                  "datasetName": "trend",
+                  "disaggregated": false,
+                  "fields": [
+                    {
+                      "name": "metric_label",
+                      "expression": "`metric_label`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "metric_label",
+                    "displayName": "Metric",
+                    "queryName": "f_trend"
+                  }
+                ]
+              },
+              "frame": {
+                "title": "Metric",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 2,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "f_trend_model",
+            "queries": [
+              {
+                "name": "f_trend",
+                "query": {
+                  "datasetName": "trend",
+                  "disaggregated": false,
+                  "fields": [
+                    {
+                      "name": "model_alias",
+                      "expression": "`model_alias`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-single-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "model_alias",
+                    "displayName": "Agent LLM",
+                    "queryName": "f_trend"
+                  }
+                ]
+              },
+              "frame": {
+                "title": "Agent LLM",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 2,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "l_trend",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "trend",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "name": "run_time",
+                      "expression": "`run_time`"
+                    },
+                    {
+                      "name": "score",
+                      "expression": "`score`"
+                    },
+                    {
+                      "name": "series",
+                      "expression": "`series`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "run_time",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Run time"
+                },
+                "y": {
+                  "fieldName": "score",
+                  "scale": {
+                    "type": "quantitative",
+                    "domain": {
+                      "min": 0,
+                      "max": 1
+                    }
+                  },
+                  "displayName": "Score"
+                },
+                "color": {
+                  "fieldName": "series",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Dataset | metric"
+                }
+              },
+              "frame": {
+                "title": "Headline metrics by run",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 4,
+            "width": 6,
+            "height": 9
+          }
+        },
+        {
+          "widget": {
+            "name": "t_runs",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "runs",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "name": "run_time",
+                      "expression": "`run_time`"
+                    },
+                    {
+                      "name": "run_name",
+                      "expression": "`run_name`"
+                    },
+                    {
+                      "name": "kind",
+                      "expression": "`kind`"
+                    },
+                    {
+                      "name": "model_alias",
+                      "expression": "`model_alias`"
+                    },
+                    {
+                      "name": "served_model",
+                      "expression": "`served_model`"
+                    },
+                    {
+                      "name": "max_rows",
+                      "expression": "`max_rows`"
+                    },
+                    {
+                      "name": "run_url",
+                      "expression": "`run_url`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "run_time",
+                    "displayName": "Run time"
+                  },
+                  {
+                    "fieldName": "run_name",
+                    "displayName": "Run"
+                  },
+                  {
+                    "fieldName": "kind",
+                    "displayName": "Kind"
+                  },
+                  {
+                    "fieldName": "model_alias",
+                    "displayName": "LLM"
+                  },
+                  {
+                    "fieldName": "served_model",
+                    "displayName": "Served model"
+                  },
+                  {
+                    "fieldName": "max_rows",
+                    "displayName": "max_rows"
+                  },
+                  {
+                    "fieldName": "run_url",
+                    "displayName": "Open in MLflow"
+                  }
+                ]
+              },
+              "frame": {
+                "title": "Runs",
+                "showTitle": true
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 13,
+            "width": 6,
+            "height": 8
+          }
+        }
+      ]
+    }
+  ]
+}
