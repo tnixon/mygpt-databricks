@@ -500,6 +500,7 @@ class MyGPTRagAgent(ResponsesAgent):
         focus = ci.get("focus", {}) or {}
         k = int(ci.get("k", 5))
         instructions = str(ci.get("instructions") or "")
+        include_context = bool(ci.get("include_context"))
         query = _last_user_text(request)
         # Phase 4: upload libraries arrive pre-retrieved (the app searched Lakebase under RLS).
         provided = sources_from_inputs(ci["sources"], k) if ci.get("sources") is not None else None
@@ -548,6 +549,9 @@ class MyGPTRagAgent(ResponsesAgent):
                         "source_name": s["source_name"], "corpus": s["corpus"], "section": s["section"], "page": s["page"],
                         "snippet": s["context"][:240], "vector_score": s.get("vector_score"),
                         "bm25_score": s.get("bm25_score"), "rerank_score": s.get("rerank_score"), "nli": s.get("nli"),
+                        # Phase 5: the Supervisor asks for the full chunk text so its own
+                        # RETRIEVER span can feed the groundedness judges.
+                        **({"chunk_id": s["chunk_id"], "context": s["context"]} if include_context else {}),
                     }
                     for s in sources
                 ],
