@@ -68,6 +68,7 @@
         "  WHERE tags['mygpt.eval.kind'] = 'reference'\n",
         ")\n",
         "-- One row per benchmark line x dataset (FR / ES are separate rows) x model alias.\n",
+        "-- :tolerance_pct (dashboard parameter): |% difference| below it counts as on par.\n",
         ", mygpt_by_benchmark AS (\n",
         "  SELECT b.sort, min(m.value) AS mygpt_min, max(m.value) AS mygpt_best, count(*) AS n_configs,\n",
         "         array_join(array_sort(collect_list(concat(m.config, ' ', format_number(m.value, 3)))), ', ') AS mygpt_configs\n",
@@ -91,19 +92,37 @@
         "       mygpt_configs, mygpt_basis,\n",
         "       round(ours - mygpt_best, 3) AS delta,\n",
         "       CASE WHEN ours - mygpt_best > 0 THEN '+' ELSE '' END AS delta_sign,\n",
+        "       round(pct_diff, 1) AS pct_diff,\n",
         "       CASE WHEN mygpt_best IS NULL THEN '-'\n",
-        "            WHEN ours - mygpt_best > 0.03 THEN 'Better'\n",
-        "            WHEN ours - mygpt_best >= -0.03 THEN 'On par'\n",
+        "            WHEN abs(pct_diff) < :tolerance_pct THEN 'On par'\n",
+        "            WHEN pct_diff > 0 THEN 'Better'\n",
         "            ELSE 'Worse' END AS status,\n",
-        "       CAST(mygpt_best IS NOT NULL AND ours - mygpt_best >= -0.03 AS INT) AS is_at_or_above,\n",
-        "       CAST(mygpt_best IS NOT NULL AND ours - mygpt_best < -0.03 AS INT) AS is_below,\n",
+        "       CAST(mygpt_best IS NOT NULL AND pct_diff > -:tolerance_pct AS INT) AS is_at_or_above,\n",
+        "       CAST(mygpt_best IS NOT NULL AND pct_diff <= -:tolerance_pct AS INT) AS is_below,\n",
         "       gate,\n",
         "       CASE WHEN gate IS NULL THEN '-' WHEN ours >= gate THEN 'Pass' ELSE 'Fail' END AS gate_status,\n",
         "       CAST(gate IS NOT NULL AND ours >= gate AS INT) AS gate_passed,\n",
         "       CAST(gate IS NOT NULL AS INT) AS gated,\n",
         "       concat(dataset_label, ' | ', benchmark) AS line\n",
-        "FROM lines\n",
+        "FROM (SELECT *, 100 * (ours - mygpt_best) / nullif(mygpt_best, 0) AS pct_diff FROM lines)\n",
         "ORDER BY sort, dataset_label\n"
+      ],
+      "parameters": [
+        {
+          "displayName": "Tolerance (%)",
+          "keyword": "tolerance_pct",
+          "dataType": "DECIMAL",
+          "defaultSelection": {
+            "values": {
+              "dataType": "DECIMAL",
+              "values": [
+                {
+                  "value": "3"
+                }
+              ]
+            }
+          }
+        }
       ]
     },
     {
@@ -608,7 +627,7 @@
         {
           "widget": {
             "name": "header",
-            "textbox_spec": "# MyGPT benchmarks: Databricks agent vs. MyGPT\n**Databricks agent** = the `mygpt-rag-agent` endpoint as served at its latest **full** eval run (`mygpt_eval`, every row of each dataset).\n**MyGPT** = the answers St. Jude's MyGPT recorded in *MyGPT-evaluations*, put through **the same scorers** (`mygpt_eval_reference`; nothing is regenerated).\nScores are accuracies (0-1). **Δ** = ours − MyGPT's best configuration; within ±0.03 counts as *on par*."
+            "textbox_spec": "# MyGPT benchmarks: Databricks agent vs. MyGPT\n**Databricks agent** = the `mygpt-rag-agent` endpoint as served at its latest **full** eval run (`mygpt_eval`, every row of each dataset).\n**MyGPT** = the answers St. Jude's MyGPT recorded in *MyGPT-evaluations*, put through **the same scorers** (`mygpt_eval_reference`; nothing is regenerated).\nScores are accuracies (0-1). **Δ** = ours − MyGPT's best configuration, and **%** = Δ as a percentage of MyGPT's score.\nA difference smaller than the **Tolerance (%)** (top right, default 3%) counts as *on par*; otherwise *better* or *worse* by its sign."
           },
           "position": {
             "x": 0,
@@ -834,7 +853,49 @@
           "position": {
             "x": 4,
             "y": 3,
-            "width": 2,
+            "width": 1,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "p_tolerance",
+            "queries": [
+              {
+                "name": "parameter_scorecard_tolerance_pct",
+                "query": {
+                  "datasetName": "scorecard",
+                  "parameters": [
+                    {
+                      "name": "tolerance_pct",
+                      "keyword": "tolerance_pct"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-single-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "parameterName": "tolerance_pct",
+                    "queryName": "parameter_scorecard_tolerance_pct"
+                  }
+                ]
+              },
+              "frame": {
+                "title": "Tolerance (%): within this = on par",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 5,
+            "y": 3,
+            "width": 1,
             "height": 3
           }
         },
@@ -871,6 +932,10 @@
                     {
                       "name": "delta",
                       "expression": "`delta`"
+                    },
+                    {
+                      "name": "pct_diff",
+                      "expression": "`pct_diff`"
                     },
                     {
                       "name": "status",
@@ -953,6 +1018,57 @@
                       }
                     },
                     "formatTemplate": "{{ delta_sign }}{{ @formatted }}",
+                    "style": {
+                      "type": "basic",
+                      "rules": [
+                        {
+                          "condition": {
+                            "operator": "=",
+                            "fieldName": "status",
+                            "operand": {
+                              "type": "data-value",
+                              "value": "Better"
+                            }
+                          },
+                          "backgroundColor": "#C8E6C9"
+                        },
+                        {
+                          "condition": {
+                            "operator": "=",
+                            "fieldName": "status",
+                            "operand": {
+                              "type": "data-value",
+                              "value": "On par"
+                            }
+                          },
+                          "backgroundColor": "#FFF3C4"
+                        },
+                        {
+                          "condition": {
+                            "operator": "=",
+                            "fieldName": "status",
+                            "operand": {
+                              "type": "data-value",
+                              "value": "Worse"
+                            }
+                          },
+                          "backgroundColor": "#FFCDD2"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "fieldName": "pct_diff",
+                    "displayName": "% vs MyGPT best",
+                    "format": {
+                      "type": "number-plain",
+                      "abbreviation": "none",
+                      "decimalPlaces": {
+                        "type": "exact",
+                        "places": 1
+                      }
+                    },
+                    "formatTemplate": "{{ delta_sign }}{{ @formatted }}%",
                     "style": {
                       "type": "basic",
                       "rules": [
@@ -1252,7 +1368,7 @@
         {
           "widget": {
             "name": "how_to_read",
-            "textbox_spec": "### How to read this\n- **SJ Global (health policies, FR / ES):** MyGPT's bar is **St. Jude's SME grading** of MyGPT's `answer_1`. Our yes/no gold is *derived from* those answers (flipped where the SMEs marked them Incorrect), so MyGPT is not re-scored against it. The reworded questions (Q6-10) and the correctness judge have no MyGPT figure.\n- **BlueSky (kinase literature):** MyGPT ran three configurations (5 or 15 context chunks, structured pre-prompt); the table shows their range and Δ is against the best. About half the kinase gold comes from a block of St. Jude's file that was shifted by one row and has been realigned (see *Robustness & trust*).\n- **BioASQ (public benchmark, 163 questions over all 397 papers):** MyGPT's figure is its gpt-oss-20b run.\n- Rows marked *(LLM judge)* use MLflow's correctness judge, which agrees with St. Jude's SMEs 75-84% of the time; treat ±0.05 differences there as noise. The code scorers agree 83-100%.\n- **Gate** = the minimum the CI eval enforces for this metric (`eval/gates.yaml`); shown once a run has logged its gates."
+            "textbox_spec": "### How to read this\n- **SJ Global (health policies, FR / ES):** MyGPT's bar is **St. Jude's SME grading** of MyGPT's `answer_1`. Our yes/no gold is *derived from* those answers (flipped where the SMEs marked them Incorrect), so MyGPT is not re-scored against it. The reworded questions (Q6-10) and the correctness judge have no MyGPT figure.\n- **BlueSky (kinase literature):** MyGPT ran three configurations (5 or 15 context chunks, structured pre-prompt); the table shows their range and Δ is against the best. About half the kinase gold comes from a block of St. Jude's file that was shifted by one row and has been realigned (see *Robustness & trust*).\n- **BioASQ (public benchmark, 163 questions over all 397 papers):** MyGPT's figure is its gpt-oss-20b run.\n- Rows marked *(LLM judge)* use MLflow's correctness judge, which agrees with St. Jude's SMEs 75-84% of the time; treat differences of up to ~8% there as noise. The code scorers agree 83-100%.\n- **Gate** = the minimum the CI eval enforces for this metric (`eval/gates.yaml`); shown once a run has logged its gates."
           },
           "position": {
             "x": 0,

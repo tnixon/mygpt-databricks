@@ -117,8 +117,8 @@ the root bundle (`resources.dashboards.mygpt_benchmarks`). It queries
 `system.mlflow.runs_latest` for this experiment directly, so it has no tables or jobs of its own.
 It refreshes on its own after every `mygpt_eval` / `mygpt_eval_reference` run.
 - **Scorecard:** each benchmark line is our latest **full** run (`max_rows = 0`) per dataset ×
-  LLM, set against MyGPT's figure. Δ is measured against MyGPT's best config; ±0.03 counts as on
-  par. Each row also shows its gate and the gate result. `run_eval` logs the gates in force as
+  LLM, set against MyGPT's figure. Δ and % are measured against MyGPT's best config. A % difference
+  smaller than the dashboard's **Tolerance (%)** parameter (default 3%) counts as on par. Each row also shows its gate and the gate result. `run_eval` logs the gates in force as
   `gate/<metric>` params, so runs from before 2026-10-15 show none.
 - **Robustness & trust:** SJ Global original vs reworded questions; each scorer's agreement
   with the SMEs, by MyGPT config and gold slice; and BlueSky per question vs each MyGPT config.

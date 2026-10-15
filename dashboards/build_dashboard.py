@@ -27,13 +27,24 @@ DATASETS = {
 
 GREEN, RED, AMBER = "#C8E6C9", "#FFCDD2", "#FFF3C4"
 
+# Dashboard parameters per dataset: (keyword, display name, data type, default).
+# The tolerance is a typed-in parameter, not a slider: AI/BI only offers range sliders as
+# field filters, and only parameters can feed the status calculation in the SQL.
+PARAMETERS = {"scorecard": [("tolerance_pct", "Tolerance (%)", "DECIMAL", "3")]}
+
 
 def dataset(name: str) -> dict:
     with open(os.path.join(HERE, "sql", "base.sql")) as f:
         base = f.read().rstrip("\n")
     with open(os.path.join(HERE, "sql", f"{name}.sql")) as f:
         body = f.read().rstrip("\n")
-    return {"name": name, "displayName": DATASETS[name], "queryLines": [line + "\n" for line in (base + "\n" + body).split("\n")]}
+    ds = {"name": name, "displayName": DATASETS[name], "queryLines": [line + "\n" for line in (base + "\n" + body).split("\n")]}
+    if name in PARAMETERS:
+        ds["parameters"] = [
+            {"displayName": label, "keyword": kw, "dataType": dtype,
+             "defaultSelection": {"values": {"dataType": dtype, "values": [{"value": default}]}}}
+            for kw, label, dtype, default in PARAMETERS[name]]
+    return ds
 
 
 def query(name: str, ds: str, fields: list[tuple[str, str]], disaggregated: bool = True) -> dict:
@@ -104,6 +115,22 @@ def filter_widget(name: str, field: str, title: str, datasets: list[str], pos: t
     }
 
 
+def parameter_widget(name: str, keyword: str, title: str, ds: str, pos: tuple[int, int, int, int]) -> dict:
+    q = {"name": f"parameter_{ds}_{keyword}",
+         "query": {"datasetName": ds, "parameters": [{"name": keyword, "keyword": keyword}], "disaggregated": False}}
+    x, y, w, h = pos
+    return {
+        "widget": {
+            "name": name,
+            "queries": [q],
+            "spec": {"version": 2, "widgetType": "filter-single-select",
+                     "encodings": {"fields": [{"parameterName": keyword, "queryName": q["name"]}]},
+                     "frame": {"title": title, "showTitle": True}},
+        },
+        "position": {"x": x, "y": y, "width": w, "height": h},
+    }
+
+
 def number_fmt(places: int) -> dict:
     return {"type": "number-plain", "abbreviation": "none", "decimalPlaces": {"type": "exact", "places": places}}
 
@@ -145,13 +172,14 @@ GATE_RULES = [rule("gate_status", "Pass", GREEN), rule("gate_status", "Fail", RE
 HEADER = """# MyGPT benchmarks: Databricks agent vs. MyGPT
 **Databricks agent** = the `mygpt-rag-agent` endpoint as served at its latest **full** eval run (`mygpt_eval`, every row of each dataset).
 **MyGPT** = the answers St. Jude's MyGPT recorded in *MyGPT-evaluations*, put through **the same scorers** (`mygpt_eval_reference`; nothing is regenerated).
-Scores are accuracies (0-1). **Δ** = ours − MyGPT's best configuration; within ±0.03 counts as *on par*."""
+Scores are accuracies (0-1). **Δ** = ours − MyGPT's best configuration, and **%** = Δ as a percentage of MyGPT's score.
+A difference smaller than the **Tolerance (%)** (top right, default 3%) counts as *on par*; otherwise *better* or *worse* by its sign."""
 
 HOW_TO_READ = """### How to read this
 - **SJ Global (health policies, FR / ES):** MyGPT's bar is **St. Jude's SME grading** of MyGPT's `answer_1`. Our yes/no gold is *derived from* those answers (flipped where the SMEs marked them Incorrect), so MyGPT is not re-scored against it. The reworded questions (Q6-10) and the correctness judge have no MyGPT figure.
 - **BlueSky (kinase literature):** MyGPT ran three configurations (5 or 15 context chunks, structured pre-prompt); the table shows their range and Δ is against the best. About half the kinase gold comes from a block of St. Jude's file that was shifted by one row and has been realigned (see *Robustness & trust*).
 - **BioASQ (public benchmark, 163 questions over all 397 papers):** MyGPT's figure is its gpt-oss-20b run.
-- Rows marked *(LLM judge)* use MLflow's correctness judge, which agrees with St. Jude's SMEs 75-84% of the time; treat ±0.05 differences there as noise. The code scorers agree 83-100%.
+- Rows marked *(LLM judge)* use MLflow's correctness judge, which agrees with St. Jude's SMEs 75-84% of the time; treat differences of up to ~8% there as noise. The code scorers agree 83-100%.
 - **Gate** = the minimum the CI eval enforces for this metric (`eval/gates.yaml`); shown once a run has logged its gates."""
 
 ROBUSTNESS_MD = """### Robustness: does the answer depend on the wording?
@@ -174,7 +202,8 @@ def build() -> dict:
         counter("c_below", "scorecard", "is_below", "Benchmarks below MyGPT", 1, 3),
         counter("c_gates_passed", "scorecard", "gate_passed", "Gates passing", 2, 3),
         counter("c_gated", "scorecard", "gated", "Gated metrics", 3, 3),
-        filter_widget("f_model", "model_alias", "Agent LLM", ["scorecard", "scorecard_long"], (4, 3, 2, 3)),
+        filter_widget("f_model", "model_alias", "Agent LLM", ["scorecard", "scorecard_long"], (4, 3, 1, 3)),
+        parameter_widget("p_tolerance", "tolerance_pct", "Tolerance (%): within this = on par", "scorecard", (5, 3, 1, 3)),
         table("t_scorecard", "scorecard", "Scorecard", [
             col("use_case_label", "Use case"),
             col("dataset_label", "Dataset"),
@@ -182,6 +211,7 @@ def build() -> dict:
             col("ours", "Databricks agent", 3),
             col("mygpt_range", "MyGPT"),
             col("delta", "Δ vs MyGPT best", 3, STATUS_RULES, "{{ delta_sign }}{{ @formatted }}", also=["delta_sign"]),
+            col("pct_diff", "% vs MyGPT best", 1, STATUS_RULES, "{{ delta_sign }}{{ @formatted }}%", also=["delta_sign"]),
             col("status", "Status", rules=STATUS_RULES),
             col("gate", "Gate", 2),
             col("gate_status", "Gate result", rules=GATE_RULES),
