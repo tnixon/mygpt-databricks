@@ -8,6 +8,8 @@ from __future__ import annotations
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import eval_datasets  # noqa: E402
@@ -41,6 +43,112 @@ def test_dataset_row_counts():
     assert len(eval_datasets.build_records("health_policies_fr", REPO)) == 21 * 10
     assert len(eval_datasets.build_records("health_policies_es", REPO)) == 21 * 10
     assert len(eval_datasets.build_records("kinase_literature", REPO)) == 3 * 94
+    assert len(eval_datasets.build_records("bioasq", REPO)) == 163
+
+
+def test_bioasq_records():
+    recs = eval_datasets.build_records("bioasq", REPO)
+    types = [r["tags"]["question_type"] for r in recs]
+    assert types.count("yesno") == 76 and types.count("factoid") == 87
+    for r in recs:
+        ci, exp = r["inputs"]["custom_inputs"], r["expectations"]
+        assert ci["corpus"] == "biomed" and ci["k"] == eval_datasets.K_BIOASQ and "focus" not in ci
+        if r["tags"]["question_type"] == "yesno":
+            assert exp["expected_label"] in ("yes", "no") and "expected_values" not in exp
+        else:
+            assert exp["expected_values"] and "expected_label" not in exp
+
+
+# --- private SME gold (synthetic CSVs: no St. Jude values in git) ----------- #
+def _write_csv(path, header: list[str], rows: list[list[str]]):
+    import csv
+
+    with open(path, "w", newline="", encoding="cp1252") as f:
+        w = csv.writer(f)
+        w.writerow(header)
+        w.writerows(rows)
+
+
+def test_policy_gold_flip_rule(tmp_path, monkeypatch):
+    _write_csv(tmp_path / eval_datasets.POLICY_GOLD,
+               ["qid", "document (Global policy)", "Document language", "question_keyword", "question",
+                "answer_1", "Correctness for Answer 1 (Correct/Incorrect)"],
+               [["1", "DocA", "French", "K1", "q", "Yes, it does.", "Correct"],
+                ["2", "DocA", "French", "K2", "q", "No.", "Incorrect"],
+                ["3", "DocA", "French", "K3", "q", "Yes, children.", "Incorrect"],
+                ["4", "DocA", "French", "K4", "q", "No.", ""],
+                ["5", "DocA", "French", "K5", "q", "The policy says…", "Correct"]])
+    monkeypatch.setattr(eval_datasets, "private_dir", lambda _b: str(tmp_path))
+    g = eval_datasets.policy_gold(REPO)
+    assert g[("DocA", "K1")] == {"expected_label": "yes", "expected_response": "Yes, it does.", "mygpt_label": "correct"}
+    assert g[("DocA", "K2")]["expected_label"] == "yes" and g[("DocA", "K2")]["expected_response"] is None
+    assert g[("DocA", "K3")]["expected_label"] == "no"
+    assert ("DocA", "K4") not in g and ("DocA", "K5") not in g  # unlabelled / no yes-no opening
+
+
+def test_kinase_gold_realigns_shifted_block(tmp_path, monkeypatch):
+    q = {"11": "Is there any information about K in this paper? ... what is the expression system for K ...",
+         "15": "Is there any information about K in this paper? ... what assay was used to detect ...",
+         "16": "Is there any information about K in this paper? ... in which figure or table is there ..."}
+    header = ["id", "question_id", "pubmed_id", "kinase", "Question", "ground_truth",
+              "answer_context_5", "label_context_5", "answer_context_15", "label_context_15",
+              "answer_str_pre", "label_str_pre"]
+    lab = ["a", "Correct", "a", "Correct", "a", "Correct"]
+    rows = [
+        # aligned pair P1
+        ["1", "11", "P1", "K", q["11"], "HEK293"] + lab,
+        ["2", "15", "P1", "K", q["15"], "protein kinase assay"] + lab,
+        # P2: from its figure row on, question_id / ground_truth sit one row too high
+        ["3", "11", "P2", "K", q["16"], "COS"] + lab,
+        ["4", "15", "P3", "K", q["11"], "protein kinase assay"] + lab,
+        ["5", "16", "P3", "K", q["15"], "Fig.4"] + lab,
+        ["6", "11", "P3", "K", q["16"], ""] + lab,
+        # back in step
+        ["7", "15", "P4", "K", q["15"], "protein kinase assay"] + lab,
+    ]
+    _write_csv(tmp_path / eval_datasets.KINASE_GOLD, header, rows)
+    monkeypatch.setattr(eval_datasets, "private_dir", lambda _b: str(tmp_path))
+    g = eval_datasets.kinase_gold_rows(REPO)
+    assert g[("P1", "K", "11")]["ground_truth"] == "HEK293" and not g[("P1", "K", "11")]["realigned"]
+    assert g[("P2", "K", "17")]["ground_truth"] == ""            # block boundary: its gold was lost
+    assert g[("P3", "K", "11")]["ground_truth"] == "COS" and g[("P3", "K", "11")]["realigned"]
+    assert g[("P3", "K", "16v2")]["ground_truth"] == "protein kinase assay"
+    assert g[("P3", "K", "17")]["ground_truth"] == "Fig.4"
+    assert g[("P4", "K", "16v2")]["ground_truth"] == "protein kinase assay" and not g[("P4", "K", "16v2")]["realigned"]
+
+
+def test_kinase_expectations_shape():
+    assert eval_datasets.kinase_expectations("11", "E.coli;mammalian") == {"expected_values": ["E.coli", "mammalian"]}
+    assert eval_datasets.kinase_expectations("17", "Fig.1;Fig.1;SFig.8.") == {"expected_values": ["Fig.1", "SFig.8"]}
+    facts = eval_datasets.kinase_expectations("16v2", "protein kinase assay;protein kinase assay")["expected_facts"]
+    assert len(facts) == 1 and "protein kinase assay" in facts[0]
+    assert eval_datasets.kinase_expectations("11", "") == {}
+
+
+_PRIVATE = eval_datasets.private_dir(REPO)
+
+
+@pytest.mark.skipif(_PRIVATE is None, reason="St. Jude's private ground truths not present")
+def test_private_gold_join_yields():
+    for name in ("health_policies_fr", "health_policies_es"):
+        recs = eval_datasets.build_records(name, REPO)
+        gold = [r["tags"]["gold"] for r in recs]
+        assert gold.count("sme") == 16 * 10 and gold.count("inherited") == 5 * 10
+        assert all(r["expectations"].get("expected_label") in ("yes", "no") for r in recs)
+        for r in recs:  # variants: label only
+            if r["tags"]["gold"] == "inherited":
+                assert r["expectations"]["gold_scope"] == "label_only" and "expected_response" not in r["expectations"]
+    recs = eval_datasets.build_records("kinase_literature", REPO)
+    assert len(eval_datasets.kinase_gold_rows(REPO)) == 282  # every (paper, kinase, question) once
+    with_gold = [r for r in recs if r["tags"]["gold"] != "none"]
+    assert len(with_gold) >= 180
+    for r in with_gold:  # every gold value fits its question type
+        qid, exp = r["tags"]["question_id"], r["expectations"]
+        if qid == "16v2":
+            assert exp["expected_facts"]
+        else:
+            fig = [eval_datasets._FIG_LIKE.match(v) is not None for v in exp["expected_values"]]
+            assert all(fig) if qid == "17" else not any(fig)
 
 
 def test_records_are_agent_requests():
@@ -134,11 +242,73 @@ def test_kinase_in_context():
     assert fb["no_match_consistent"] is True
 
 
+# --- gold scorers ----------------------------------------------------------- #
+def test_yes_no_correct():
+    assert _val(s.yes_no_correct(outputs=_out("No, it does not."), expectations={"expected_label": "no"})) is True
+    assert _val(s.yes_no_correct(outputs=_out("Oui, ..."), expectations={"expected_label": "no"})) is False
+    assert _val(s.yes_no_correct(outputs=_out("Unclear."), expectations={"expected_label": "yes"})) is False
+    assert s.yes_no_correct(outputs=_out("Yes"), expectations={"guidelines": ["x"]}) is None
+
+
+def test_expression_system_correct():
+    inputs = _kinase_inputs("11")
+    exp = {"expected_values": ["HEK293", "E.coli"]}
+    assert _val(s.expression_system_correct(inputs=inputs, outputs=_out("['HEK293T']"), expectations=exp)) is True
+    assert _val(s.expression_system_correct(inputs=inputs, outputs=_out("['Escherichia coli']"), expectations=exp)) is True
+    assert _val(s.expression_system_correct(inputs=inputs, outputs=_out("['COS-7']"), expectations=exp)) is False
+    assert _val(s.expression_system_correct(inputs=inputs, outputs=_out("['Plat-E']"), expectations=exp)) is True
+    assert _val(s.expression_system_correct(inputs=inputs, outputs=_out("['BL21(DE3)']"), expectations=exp)) is True
+    insect = {"expected_values": ["SF21"]}
+    assert _val(s.expression_system_correct(inputs=inputs, outputs=_out("['insect cell']"), expectations=insect)) is True
+    assert _val(s.expression_system_correct(inputs=inputs, outputs=_out("['Sf9']"), expectations=insect)) is True
+    assert _val(s.expression_system_correct(inputs=inputs, outputs=_out("no answer"), expectations=exp)) is False
+    assert s.expression_system_correct(inputs=inputs, outputs=_out("['HEK293']"), expectations={}) is None
+    assert s.expression_system_correct(inputs=_kinase_inputs("17"), outputs=_out("x"), expectations=exp) is None
+
+
+def test_figure_key():
+    assert s.figure_key("Fig. 4B") == "fig4"
+    assert s.figure_key("FIG.5 A") == "fig5"
+    assert s.figure_key("Figure 1A") == "fig1"
+    assert s.figure_key("Table III") == "table3"
+    assert s.figure_key("SFig.8") == "sfig8"
+    assert s.figure_key("Supplementary Figure S3") == "sfig3"
+    assert s.figure_key("ST1") == "stable1"
+    assert s.figure_key("Fig") is None and s.figure_key("the methods section") is None
+
+
+def test_figure_ref_match():
+    inputs = _kinase_inputs("17")
+    exp = {"expected_values": ["Fig.1", "Fig.4"]}
+    fb = {f.name: f.value for f in s.figure_ref_match(inputs=inputs, outputs=_out("['Fig. 1A', 'Fig. 2']"), expectations=exp)}
+    assert fb == {"figure_ref_match": True, "figure_ref_recall": 0.5}
+    fb = {f.name: f.value for f in s.figure_ref_match(inputs=inputs, outputs=_out("no answer"), expectations=exp)}
+    assert fb == {"figure_ref_match": False, "figure_ref_recall": 0.0}
+    assert s.figure_ref_match(inputs=inputs, outputs=_out("x"), expectations={}) is None
+
+
+def test_factoid_match():
+    exp = {"expected_values": ["EGFRvIII", "EGFR variant III"]}
+    assert _val(s.factoid_match(outputs=_out("It is the EGFR variant III mutation."), expectations=exp)) is True
+    assert _val(s.factoid_match(outputs=_out("It is BRAF."), expectations=exp)) is False
+    assert s.factoid_match(outputs=_out("Yes"), expectations={"expected_label": "yes", "expected_values": ["x"]}) is None
+
+
+def test_gold_correctness_skips_without_gold():
+    assert s.gold_correctness(inputs={"input": []}, outputs=_out("x"), expectations={"guidelines": ["g"]}) is None
+    # SJ Global variants inherit only the yes/no label, even if a stale expected_response survives
+    stale = {"expected_label": "yes", "expected_response": "Yes, ...", "gold_scope": "label_only"}
+    assert s.gold_correctness(inputs={"input": []}, outputs=_out("Yes"), expectations=stale) is None
+
+
 def test_scorer_sets_build():
     names = {sc.name for sc in s.scorers_for("sj_global")}
-    assert {"retrieval_groundedness", "yes_no_format", "answer_label", "mygpt_trust"} <= names
+    assert {"retrieval_groundedness", "yes_no_format", "answer_label", "mygpt_trust", "yes_no_correct", "gold_correctness"} <= names
     names = {sc.name for sc in s.scorers_for("bluesky", vocab=["E. coli"])}
-    assert {"js_array_valid", "vocab_compliance", "kinase_in_context"} <= names
+    assert {"js_array_valid", "vocab_compliance", "kinase_in_context", "expression_system_correct", "figure_ref_match"} <= names
+    names = {sc.name for sc in s.scorers_for("bioasq")}
+    assert {"yes_no_correct", "factoid_match", "gold_correctness", "retrieval_ok"} <= names
+    assert "yes_no_format" not in names and "focus_adherence" not in names
 
 
 # --- run_eval post-run helpers ---------------------------------------------- #
@@ -167,3 +337,86 @@ def test_hi_vs_groundedness():
     rows = pd.DataFrame([_persisted_row(records[0], "yes", 5, "yes"), _persisted_row(records[1], "no", 50, "no")])
     assert run_eval.hi_vs_groundedness(rows) == 1.0  # higher HI on the ungrounded row
     assert run_eval.auroc([1, 2], [True, True]) is None
+
+
+def _gold_records():
+    recs = eval_datasets.build_records("health_policies_fr", REPO)[:2]
+    recs[0]["expectations"]["expected_label"], recs[0]["tags"]["gold"] = "yes", "sme"
+    recs[1]["expectations"]["expected_label"], recs[1]["tags"]["gold"] = "yes", "inherited"
+    return recs
+
+
+def test_gold_breakdown_by_provenance():
+    recs = _gold_records()
+    rows = pd.DataFrame([
+        {**_persisted_row(recs[0], "yes", 5, "yes"), "yes_no_correct/value": True},
+        {**_persisted_row(recs[1], "no", 5, "yes"), "yes_no_correct/value": False},
+    ])
+    assert run_eval.gold_breakdown(rows, recs) == {"yes_no_correct/sme/mean": 1.0, "yes_no_correct/inherited/mean": 0.0}
+
+
+def test_coding_matrix_vs_gold():
+    recs = _gold_records()
+    rows = pd.DataFrame([_persisted_row(recs[0], "yes", 5, "yes"), _persisted_row(recs[1], "no", 5, "yes")])
+    m = run_eval.coding_matrix_vs_gold(rows, recs)
+    assert list(m["correct"]) == [True, False] and list(m["gold_source"]) == ["sme", "inherited"]
+
+
+# --- reference baseline ---------------------------------------------------- #
+import reference_baseline as rb  # noqa: E402
+
+
+def test_reference_summarize_agreement():
+    rows = [{"use_case": "bluesky", "config": "ctx5", "sme": True},
+            {"use_case": "bluesky", "config": "ctx5", "sme": False},
+            {"use_case": "bluesky", "config": "ctx5", "sme": True}]
+    scored = [{"expression_system_correct": True}, {"expression_system_correct": True}, {}]
+    m = rb.summarize(rows, scored)
+    assert m["mygpt_ref/bluesky/ctx5/sme_accuracy"] == 2 / 3
+    assert m["mygpt_ref/bluesky/ctx5/expression_system_correct"] == 1.0
+    assert m["mygpt_ref/bluesky/ctx5/expression_system_correct/agreement"] == 0.5
+
+
+def test_reference_summarize_splits_gold_provenance():
+    rows = [{"use_case": "bluesky", "config": "ctx5", "sme": True, "gold": "sme"},
+            {"use_case": "bluesky", "config": "ctx5", "sme": True, "gold": "sme_realigned"}]
+    scored = [{"expression_system_correct": True}, {"expression_system_correct": False}]
+    m = rb.summarize(rows, scored)
+    assert m["mygpt_ref/bluesky/ctx5/sme/expression_system_correct/agreement"] == 1.0
+    assert m["mygpt_ref/bluesky/ctx5/sme_realigned/expression_system_correct/agreement"] == 0.0
+    assert m["mygpt_ref/bluesky/ctx5/expression_system_correct/agreement"] == 0.5
+
+
+def test_reference_bioasq_rows_score_without_judge():
+    rows = [r for r in rb.reference_rows(REPO) if r["use_case"] == "bioasq"]
+    assert len(rows) == 163
+    scored = [rb.score_row(r, judge=False) for r in rows]
+    yesno = [v["yes_no_correct"] for r, v in zip(rows, scored) if r["question_type"] == "yesno"]
+    assert len(yesno) == 76 and sum(map(bool, yesno)) > 50  # MyGPT's published answers are mostly right
+    assert all("factoid_match" in v for r, v in zip(rows, scored) if r["question_type"] == "factoid")
+
+
+@pytest.mark.skipif(_PRIVATE is None, reason="St. Jude's private ground truths not present")
+def test_reference_kinase_rows():
+    rows = [r for r in rb.reference_rows(REPO) if r["use_case"] == "bluesky"]
+    assert len(rows) == 3 * 282
+    scored = [rb.score_row(r, judge=False) for r in rows]
+    m = rb.summarize(rows, scored)
+    assert 0 < m["mygpt_ref/bluesky/ctx15/sme_accuracy"] <= 1
+    assert "mygpt_ref/bluesky/ctx15/expression_system_correct/agreement" in m
+
+
+def test_bioasq_gates_skip_focus_adherence():
+    gates = os.path.join(REPO, "eval", "gates.yaml")
+    def focus_failures(use_case):
+        return [f for f in run_eval.check_gates({}, use_case, gates) if f.startswith("focus_adherence")]
+
+    assert focus_failures("bioasq") == []
+    assert focus_failures("sj_global")  # still enforced there
+
+
+def test_gates_for_merges_shared_and_drops_null():
+    gates = run_eval.gates_for("bioasq", os.path.join(REPO, "eval", "gates.yaml"))
+    assert gates["retrieval_ok/mean"] == 1.0  # shared, re-stated
+    assert "focus_adherence/mean" not in gates  # nulled by the use case
+    assert None not in gates.values()

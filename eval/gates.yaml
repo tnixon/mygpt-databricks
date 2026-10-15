@@ -24,6 +24,17 @@ sj_global:
   # Informational only: SJ Global asks "does the document mention X?", so when X is
   # absent every chunk is (correctly) judged irrelevant -> ~0.15 by design.
   retrieval_relevance/mean: null
+  # Gold (St. Jude SME labels; eval_datasets.policy_gold). Gold baseline: agent v12, Sonnet,
+  # 2026-10-13 (FR 98c0fd4d…, ES cb54504a…); gates sit just below the lower of FR / ES.
+  #   yes_no_correct 0.771 / 0.695 (sme 0.806 / 0.744, inherited 0.660 / 0.540)
+  #   gold_correctness 0.759 / 0.672
+  # MyGPT's own SME accuracy (the parity bar) is 0.841, logged by mygpt_eval_reference.
+  yes_no_correct/mean: 0.65
+  yes_no_correct/sme/mean: 0.70       # base questions (SME-labelled)
+  # Q6-10 variants (inherit the base question's gold): informational, 50 rows per language
+  # is too noisy to gate (±0.07).
+  yes_no_correct/inherited/mean: null
+  gold_correctness/mean: 0.62
 
 bluesky:
   # Baseline: agent v11, Sonnet, 282 rows, 2026-10-13 (run 10e3b9e0…). Gates sit just below it.
@@ -38,8 +49,29 @@ bluesky:
   relevance_to_query/mean: 0.80
   mygpt_grounding/mean: 0.78
   safety/mean: 0.98
-  # Re-baselining: the first run's per-row guideline included an unjudgeable "no match"
-  # clause (fixed in eval_datasets.py); set this from the re-run.
-  expectations_guidelines/mean: null
+  # Re-baselined on the gold run (0.972) after the "no match" guideline fix.
+  expectations_guidelines/mean: 0.92
   vocab_compliance/mean: null     # enforce once expression_systems_list.csv lands
   retrieval_relevance/mean: null  # informational (0.315), as for SJ Global
+  # Gold (St. Jude ground truths; eval_datasets.kinase_gold_rows). Gold baseline: agent v12,
+  # Sonnet, 2026-10-13 (run 67793350…), ~66 gold rows per question. The `sme_realigned`
+  # slice is gold repaired from the file's shifted block.
+  #   expression_system_correct 0.424  figure_ref_match 0.985  gold_correctness 0.603
+  expression_system_correct/mean: 0.35   # Q11
+  figure_ref_match/mean: 0.93            # Q17 (any overlap, as the SMEs graded)
+  gold_correctness/mean: 0.52            # Q16v2 (assay category; LLM judge, 75-84% SME agreement)
+
+bioasq:
+  # Public benchmark (163 questions: 76 yes/no + 87 factoid) over the whole biomed corpus.
+  # Baseline: agent v12, Sonnet, 2026-10-14 (run 4675fbdb…); gates sit just below it.
+  #   yes_no_correct 0.908  factoid_match 0.678  gold_correctness 0.519
+  #   retrieval_groundedness 0.939  relevance_to_query 0.963  mygpt_grounding 0.736
+  # MyGPT's gpt-oss-20b answers (mygpt_eval_reference): yes/no 0.934, factoid 0.609,
+  # gold_correctness 0.456.
+  retrieval_ok/mean: 1.0
+  focus_adherence/mean: null  # overrides `shared`: BioASQ retrieves library-wide (no focus)
+  yes_no_correct/mean: 0.85
+  factoid_match/mean: 0.62
+  gold_correctness/mean: 0.45
+  retrieval_groundedness/mean: 0.89
+  safety/mean: 0.98

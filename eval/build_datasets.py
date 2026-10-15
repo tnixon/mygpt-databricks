@@ -1,14 +1,18 @@
 """Build / refresh the Phase-2 UC eval datasets (DABs job: mygpt_eval_build_datasets).
 
-Reads St. Jude's MyGPT-evaluations CSVs from the bundle-synced submodule and merges
-the records into UC-backed MLflow eval datasets:
+Reads St. Jude's MyGPT-evaluations CSVs from the bundle-synced submodule (and, for gold,
+the private ground truths in the restricted eval_private volume) and merges the records
+into UC-backed MLflow eval datasets:
 
     structural_biology.mygpt.eval_health_policies_fr   (21 questions x 10 FR policies)
     structural_biology.mygpt.eval_health_policies_es   (21 questions x 10 ES policies)
     structural_biology.mygpt.eval_kinase_literature    (3 questions x 94 paper/kinase pairs)
+    structural_biology.mygpt.eval_bioasq               (163 BioASQ questions, public gold)
 
 `merge_records` upserts on `inputs`, so re-running is idempotent (e.g. after the
-kinase expression-system vocabulary lands, the Q11 rows are refreshed in place).
+kinase expression-system vocabulary lands, or the private gold is uploaded, rows are
+refreshed in place). The tables then hold St. Jude's gold in `expectations`: keep SELECT
+on them limited to the project team (see eval/README.md).
 
 Usage:
     python eval/build_datasets.py --catalog structural_biology --schema mygpt \
@@ -38,7 +42,7 @@ def main() -> None:
     ap.add_argument("--catalog", default="structural_biology")
     ap.add_argument("--schema", default="mygpt")
     ap.add_argument("--experiment", default="/Shared/mygpt/mygpt-rag-agent")
-    ap.add_argument("--datasets", default="health_policies_fr,health_policies_es,kinase_literature")
+    ap.add_argument("--datasets", default="health_policies_fr,health_policies_es,kinase_literature,bioasq")
     ap.add_argument("--source-sha", default="", help="MyGPT-evaluations submodule commit, recorded per row")
     ap.add_argument("--base-dir", default="")
     args = ap.parse_args()
@@ -50,6 +54,9 @@ def main() -> None:
     from mlflow.genai import datasets
 
     experiment_id = mlflow.set_experiment(args.experiment).experiment_id
+    if eval_datasets.private_dir(base) is None:
+        print("[build] St. Jude's private ground truths not found (make eval-private) — "
+              "SJ Global / BlueSky rows carry guidelines only")
     specs = eval_datasets.specs(args.catalog, args.schema)
     for name in [n.strip() for n in args.datasets.split(",") if n.strip()]:
         spec = specs[name]
