@@ -85,7 +85,7 @@ RETURN (
           'return_type', 'entry',
           'request_options', named_struct(
             'paginate', named_struct('start', 0, 'rows', 10),
-            'sort', array(named_struct('sort_by', 'rcsb_entry_info.resolution_combined', 'direction', 'asc'))))))).text,
+            'sort', array(named_struct('sort_by', 'rcsb_entry_info.resolution_combined', 'direction', 'asc')))))).text,
       'total_count BIGINT, result_set ARRAY<STRUCT<identifier: STRING, score: DOUBLE>>') AS r
   )
   SELECT CASE WHEN coalesce(size(r.result_set), 0) = 0 THEN '{"total":0,"entries":[]}'

@@ -457,9 +457,21 @@ already have. Details are in `eval/README.md`.
   either search on gene name + organism (attribute query), or label the count as text
   matches. It should also enrich the IDs in one GraphQL call (`data.rcsb.org/graphql`, a
   second connection `rcsb_data`) and return compact rows.
-- **Still open:** calling managed MCP from *inside* Model Serving (spike 4). This is checked
-  when the Supervisor is first deployed (declared `DatabricksFunction` / `DatabricksGenieSpace`
-  / `DatabricksUCConnection` resources).
+- **Managed MCP works from inside Model Serving (spike 4, 2026-10-16).** `mygpt-supervisor`
+  v1 reaches functions MCP and Genie MCP over plain REST JSON-RPC
+  (`WorkspaceClient().api_client.do`). The only credentials are the declared
+  `DatabricksFunction` / `DatabricksGenieSpace` / `DatabricksUCConnection` resources.
+  `agents/supervisor/smoke_test.py` passes all four routes:
+  - documents: verbatim RAG answer, QRS 56 / ARS 83 / HI 0, `scores_scope=answer`;
+  - genie: kinases per group;
+  - tools: `search_pdb_by_gene` gives 74 human ABL1 entries;
+  - libraries: `create_library` is proposed, not executed.
+
+  A multi-tool question ("Summarize PMID 10498895 … is it in the library?") calls
+  `pubmed_summary` and then `search_documents`, giving `scores_scope=documents_part`.
+- **Deploy gotcha:** SQL-function bodies are parsed only at `CREATE`, so a stray `)` first
+  failed `mygpt_deploy_tools`. `agents/tools/test_tools.py` now checks parenthesis balance.
+  Before deploying, run each HTTP body as a `SELECT` on the warehouse.
 - **Blocked for the assistant:** UC and serving object creation is user-run (`!` commands),
   like `bundle run`.
 

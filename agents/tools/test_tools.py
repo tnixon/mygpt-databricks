@@ -68,3 +68,16 @@ def test_external_calls_use_governed_connections():
     with open(os.path.join(os.path.dirname(SQL), "01_connections.sql"), encoding="utf-8") as f:
         declared = set(re.findall(r"CREATE CONNECTION IF NOT EXISTS (\w+)", f.read()))
     assert conns <= declared
+
+
+def test_sql_parentheses_balance():
+    """The SQL functions are deployed unexecuted; an unbalanced paren only surfaces at deploy."""
+    for stmt in re.split(r";\s*\n", _sql()):
+        s = re.sub(r"--[^\n]*", "", stmt)
+        s = re.sub(r"\$\$.*?\$\$", "", s, flags=re.S)
+        s = re.sub(r"'(?:[^'\\]|\\.)*'", "''", s)
+        depth = 0
+        for ch in s:
+            depth += (ch == "(") - (ch == ")")
+            assert depth >= 0, f"unbalanced ')' in: {s.strip()[:80]}"
+        assert depth == 0, f"unclosed '(' in: {s.strip()[:80]}"
