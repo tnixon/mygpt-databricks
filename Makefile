@@ -72,5 +72,5 @@ eval-private: ## Upload St. Jude's private ground truths to the restricted eval_
 	@test -d "$(EVAL_PRIVATE)" || (echo "missing $(EVAL_PRIVATE) (St. Jude's private ground truths)"; exit 1)
 	databricks fs cp -r --overwrite "$(EVAL_PRIVATE)" $(PRIVATE_VOLUME) --profile $(PROFILE)
 
-eval-test: ## Unit-test the eval harness + agent scoring / provided-sources (no workspace needed)
-	uv run --no-project --with-requirements eval/requirements.txt pytest -q eval/ agents/rag_agent/test_scoring.py agents/rag_agent/test_provided_sources.py
+eval-test: ## Unit-test the eval harness, agent scoring / provided-sources, Supervisor + tools (no workspace needed)
+	uv run --no-project --with-requirements eval/requirements.txt pytest -q eval/ agents/rag_agent/test_scoring.py agents/rag_agent/test_provided_sources.py agents/supervisor/test_supervisor.py agents/tools/test_tools.py

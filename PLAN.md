@@ -419,6 +419,62 @@ already have. Details are in `eval/README.md`.
 - **Depends on:** Phase 1 (retrieval as a tool), Phase 4 (user context); a seed structured table for Genie, landed by a minimal loader in Phase 5. Spreadsheet→table ingestion at scale arrives with Phase 3.
 - **Closes gaps:** 12; Supervisor + Genie routing (net-new).
 
+**Settled design (plan approved 2026-10-15):**
+- **Supervisor** = a custom MLflow `ResponsesAgent` (`mygpt-supervisor`). It runs a
+  tool-calling loop on the `mygpt-chat` gateway.
+  - Documents go to the unchanged `mygpt-rag-agent`. On a documents-only route its answer
+    and QRS/ARS/HI pass through verbatim.
+  - Structured questions go to Genie, and domain tools are UC functions, both via **managed
+    MCP**.
+- **The agents still never touch Lakebase.** Library write tools (create library, add
+  document from URL, re-ingest) are returned as *proposed actions*. The app runs them under
+  RLS after the user confirms.
+- **Azure AI Foundry** is a config-driven served entity on `mygpt-chat`. It stays off until
+  St. Jude provides the deployment.
+- **Genie seed** = `kinome` + `kinase_papers` (from the kinase_literature CSVs) + a
+  `corpus_documents` view.
+
+### Feasibility spikes (2026-10-15)
+- **Managed MCP is available.**
+  - `/api/2.0/mcp/functions/structural_biology/mygpt` answers `tools/list` / `tools/call`.
+  - A UC function is exposed as `structural_biology__mygpt__<fn>`, and its description and
+    argument schema come from the SQL `COMMENT`s.
+  - `tools/call` results come back in a `{columns, rows}` envelope.
+- **Genie MCP** (`/api/2.0/mcp/genie/<space_id>`) is asynchronous. It exposes
+  `query_space_<id>` and `poll_response_<id>`, so the Supervisor must poll.
+- **External HTTP from UC functions works.**
+  - Spike objects (kept; Step 3 takes them over): the HTTP connection `rcsb_search`
+    (`https://search.rcsb.org/rcsbsearch/v2`, placeholder bearer token, which RCSB ignores) and
+    the SQL UDF `search_pdb(query)` using `http_request`.
+  - Both direct SQL and MCP `tools/call` return live RCSB results, so no FastMCP fallback App
+    is needed.
+- **Chat gateway works with tool calling.**
+  - Spike object: `mygpt-chat`, provider `databricks-model-serving` →
+    `databricks-claude-sonnet-5`, secret `mygpt/gw_upstream_token`. It was READY immediately.
+  - `tools` → `tool_calls` and the `role: tool` follow-up turn both pass through.
+- **Finding:** an RCSB full-text search for "ABL1 kinase" returns 4,448 *text matches*. The
+  LLM reported those as "4,448 ABL1 structures". The final `search_pdb` must therefore
+  either search on gene name + organism (attribute query), or label the count as text
+  matches. It should also enrich the IDs in one GraphQL call (`data.rcsb.org/graphql`, a
+  second connection `rcsb_data`) and return compact rows.
+- **Managed MCP works from inside Model Serving (spike 4, 2026-10-16).** `mygpt-supervisor`
+  v1 reaches functions MCP and Genie MCP over plain REST JSON-RPC
+  (`WorkspaceClient().api_client.do`). The only credentials are the declared
+  `DatabricksFunction` / `DatabricksGenieSpace` / `DatabricksUCConnection` resources.
+  `agents/supervisor/smoke_test.py` passes all four routes:
+  - documents: verbatim RAG answer, QRS 56 / ARS 83 / HI 0, `scores_scope=answer`;
+  - genie: kinases per group;
+  - tools: `search_pdb_by_gene` gives 74 human ABL1 entries;
+  - libraries: `create_library` is proposed, not executed.
+
+  A multi-tool question ("Summarize PMID 10498895 … is it in the library?") calls
+  `pubmed_summary` and then `search_documents`, giving `scores_scope=documents_part`.
+- **Deploy gotcha:** SQL-function bodies are parsed only at `CREATE`, so a stray `)` first
+  failed `mygpt_deploy_tools`. `agents/tools/test_tools.py` now checks parenthesis balance.
+  Before deploying, run each HTTP body as a `SELECT` on the warehouse.
+- **Blocked for the assistant:** UC and serving object creation is user-run (`!` commands),
+  like `bundle run`.
+
 ## Phase 6 — Multilingual
 - **Goal:** enable the multilingual use case (e.g. SJ Global French/Spanish).
 - **Build:** per-dataset document language; query/answer translation; language-specific BM25 stemmers and rerankers; Devanagari/garbled-text parse fallback.

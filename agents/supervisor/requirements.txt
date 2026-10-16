@@ -1,0 +1,4 @@
+# Serving-image dependencies for the MyGPT Supervisor (CPU). Pure routing: every model and
+# tool is reached over REST (chat gateway, RAG endpoint, managed MCP), so no torch here.
+mlflow>=3.4
+databricks-sdk>=0.40

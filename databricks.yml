@@ -14,6 +14,10 @@
 #   databricks bundle run mygpt_deploy_embedding -p mygpt
 #   databricks bundle run mygpt_deploy_gateway -p mygpt   # AI Gateway (needs secret, below)
 #   databricks bundle run mygpt_deploy_agent -p mygpt
+#   (Phase 5) databricks bundle run mygpt_deploy_chat_gateway -p mygpt   # mygpt-chat (AI Gateway)
+#   (Phase 5) databricks bundle run mygpt_deploy_tools -p mygpt          # UC-function tools (managed MCP)
+#   (Phase 5) databricks bundle run mygpt_deploy_genie -p mygpt          # Genie space over the seed tables
+#   (Phase 5) databricks bundle run mygpt_deploy_supervisor -p mygpt     # mygpt-supervisor
 #   databricks bundle run mygpt_eval_build_datasets -p mygpt   # Phase 2: UC eval datasets
 #   databricks bundle run mygpt_eval -p mygpt                  # Phase 2: eval runs (+ gates)
 #   databricks bundle run mygpt_eval_monitor -p mygpt          # Phase 2: production monitoring
@@ -137,6 +141,15 @@ resources:
             parameters:
               ["--index", "${var.catalog}.${var.schema}.${var.vs_index}",
                "--source-table", "${var.catalog}.${var.schema}.doc_chunks"]
+        # Phase 5: structured tables for Genie (kinome, kinase_papers, corpus_documents view).
+        # After parse_chunk_index because the view counts doc_chunks.
+        - task_key: structured_seed
+          depends_on: [{ task_key: parse_chunk_index }]
+          environment_key: default
+          spark_python_task:
+            python_file: etl/structured_seed.py
+            parameters:
+              ["--catalog", "${var.catalog}", "--schema", "${var.schema}", "--base-dir", "${workspace.file_path}"]
       environments:
         - environment_key: default
           spec:
@@ -205,6 +218,84 @@ resources:
             # job only needs the SDK; no torch/sentence-transformers serving libs.
             dependencies:
               - mlflow>=3.1.0
+              - databricks-sdk>=0.40
+
+    # Phase 5: Unity AI Gateway chat endpoint mygpt-chat (FMAPI Sonnet; usage tracking,
+    # inference table, per-user rate limit). Add the Azure AI Foundry route with
+    #   --azure-endpoint https://<res>.openai.azure.com --azure-deployment <name>
+    # once St. Jude shares it (secret mygpt/azure_foundry_key).
+    mygpt_deploy_chat_gateway:
+      name: "[mygpt] Deploy Unity AI Gateway chat endpoint"
+      tasks:
+        - task_key: deploy_chat_gateway
+          environment_key: default
+          spark_python_task:
+            python_file: agents/gateway/driver.py
+            parameters:
+              ["--task", "chat", "--catalog", "${var.catalog}", "--schema", "${var.schema}",
+               "--base-dir", "${workspace.file_path}"]
+      environments:
+        - environment_key: default
+          spec:
+            client: "1"
+            dependencies:
+              - databricks-sdk>=0.70
+
+    # Phase 5: the domain tools as UC functions in <catalog>.mygpt_tools (served by managed
+    # MCP) and the HTTP connections they call.
+    mygpt_deploy_tools:
+      name: "[mygpt] Deploy UC-function tools (managed MCP)"
+      tasks:
+        - task_key: connections
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file:
+              path: agents/tools/sql/01_connections.sql
+        - task_key: functions
+          depends_on: [{ task_key: connections }]
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file:
+              path: agents/tools/sql/02_functions.sql
+
+    # Phase 5: Genie space over the structured seed tables (mygpt_etl structured_seed).
+    mygpt_deploy_genie:
+      name: "[mygpt] Deploy Genie space (structured data)"
+      tasks:
+        - task_key: deploy_genie
+          environment_key: default
+          spark_python_task:
+            python_file: agents/genie/driver.py
+            parameters:
+              ["--catalog", "${var.catalog}", "--schema", "${var.schema}", "--warehouse-id", "${var.warehouse_id}",
+               "--base-dir", "${workspace.file_path}"]
+      environments:
+        - environment_key: default
+          spec:
+            client: "1"
+            dependencies:
+              - databricks-sdk>=0.40
+
+    # Phase 5: the Supervisor. Needs mygpt-chat, mygpt-rag-agent, the tools and the Genie space.
+    mygpt_deploy_supervisor:
+      name: "[mygpt] Deploy MyGPT Supervisor ResponsesAgent endpoint"
+      tasks:
+        - task_key: deploy_supervisor
+          environment_key: default
+          spark_python_task:
+            python_file: agents/supervisor/driver.py
+            parameters:
+              ["--catalog", "${var.catalog}", "--schema", "${var.schema}", "--warehouse-id", "${var.warehouse_id}",
+               "--base-dir", "${workspace.file_path}", "--experiment", "${resources.experiments.mygpt_rag_agent.name}"]
+      environments:
+        - environment_key: default
+          spec:
+            client: "1"
+            # Pure routing: no serving libs. The log-time validation predict calls mygpt-chat
+            # and managed MCP live.
+            dependencies:
+              - mlflow>=3.4
+              - databricks-agents
               - databricks-sdk>=0.40
 
     mygpt_deploy_agent:
