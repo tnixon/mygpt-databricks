@@ -6,6 +6,7 @@ into UC-backed MLflow eval datasets:
 
     structural_biology.mygpt.eval_health_policies_fr   (21 questions x 10 FR policies)
     structural_biology.mygpt.eval_health_policies_es   (21 questions x 10 ES policies)
+    structural_biology.mygpt.eval_health_policies_hi   (21 questions x the public Hindi policies, Phase 6)
     structural_biology.mygpt.eval_kinase_literature    (3 questions x 94 paper/kinase pairs)
     structural_biology.mygpt.eval_bioasq               (163 BioASQ questions, public gold)
 
@@ -42,7 +43,7 @@ def main() -> None:
     ap.add_argument("--catalog", default="structural_biology")
     ap.add_argument("--schema", default="mygpt")
     ap.add_argument("--experiment", default="/Shared/mygpt/mygpt-rag-agent")
-    ap.add_argument("--datasets", default="health_policies_fr,health_policies_es,kinase_literature,bioasq")
+    ap.add_argument("--datasets", default="health_policies_fr,health_policies_es,health_policies_hi,kinase_literature,bioasq")
     ap.add_argument("--source-sha", default="", help="MyGPT-evaluations submodule commit, recorded per row")
     ap.add_argument("--base-dir", default="")
     args = ap.parse_args()
@@ -61,6 +62,9 @@ def main() -> None:
     for name in [n.strip() for n in args.datasets.split(",") if n.strip()]:
         spec = specs[name]
         records = eval_datasets.build_records(name, base, args.source_sha)
+        if not records:
+            print(f"{spec.uc_table}: no records (corpus {spec.corpus} not in the docs volume yet) — skipped")
+            continue
         try:
             ds = datasets.get_dataset(name=spec.uc_table)
         except Exception:  # noqa: BLE001  (not created yet)

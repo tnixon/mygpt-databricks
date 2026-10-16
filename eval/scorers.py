@@ -386,7 +386,7 @@ _GROUNDING_GUIDELINES = Guidelines(
     guidelines=[
         "The response only states facts that are supported by the documents the assistant retrieved; "
         "if the documents don't cover the question, it says so instead of guessing.",
-        "The response answers in the language of the question (English), even when the source documents "
+        "The response answers in the language of the question, even when the source documents "
         "are in another language.",
     ],
 )

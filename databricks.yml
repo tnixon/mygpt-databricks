@@ -24,7 +24,7 @@
 #   (Phase 4) the app triggers mygpt_upload_ingest itself; see app/README.md for the order.
 #
 # NOTE 1: Vector Search index CREATION remains a one-time API step (see the tail of
-# etl/sql/02_parse_chunk_index.sql); SYNCING it is the last task of mygpt_etl.
+# etl/sql/02b_chunk_merge.sql); SYNCING it is the last task of mygpt_etl.
 # NOTE 2: mygpt_deploy_gateway needs a secret token with CAN QUERY on mygpt-bge-m3:
 #   databricks secrets create-scope mygpt --profile mygpt   # if absent
 #   databricks secrets put-secret mygpt gw_upstream_token --profile mygpt
@@ -125,16 +125,31 @@ resources:
             warehouse_id: ${var.warehouse_id}
             file:
               path: etl/sql/02_parse_chunk_index.sql
-        - task_key: sections_and_config
+        # Phase 6: re-extract garbled / script-less (e.g. Hindi without Devanagari) documents
+        # with PyMuPDF before chunking; records doc_parse_quality. No-op when nothing is flagged.
+        - task_key: parse_fallback
           depends_on: [{ task_key: parse_chunk_index }]
+          environment_key: default
+          spark_python_task:
+            python_file: etl/parse_fallback.py
+            parameters:
+              ["--catalog", "${var.catalog}", "--schema", "${var.schema}", "--base-dir", "${workspace.file_path}"]
+        - task_key: chunk_merge
+          depends_on: [{ task_key: parse_fallback }]
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file:
+              path: etl/sql/02b_chunk_merge.sql
+        - task_key: sections_and_config
+          depends_on: [{ task_key: chunk_merge }]
           sql_task:
             warehouse_id: ${var.warehouse_id}
             file:
               path: etl/sql/03_sections_and_config.sql
-        # 02 MERGEs chunk changes into doc_chunks; sync the TRIGGERED index so they become
+        # 02b MERGEs chunk changes into doc_chunks; sync the TRIGGERED index so they become
         # searchable, and wait until it has caught up (fails on a row-count mismatch).
         - task_key: sync_index
-          depends_on: [{ task_key: parse_chunk_index }]
+          depends_on: [{ task_key: chunk_merge }]
           environment_key: default
           spark_python_task:
             python_file: etl/sync_index.py
@@ -142,9 +157,9 @@ resources:
               ["--index", "${var.catalog}.${var.schema}.${var.vs_index}",
                "--source-table", "${var.catalog}.${var.schema}.doc_chunks"]
         # Phase 5: structured tables for Genie (kinome, kinase_papers, corpus_documents view).
-        # After parse_chunk_index because the view counts doc_chunks.
+        # After chunk_merge because the view counts doc_chunks.
         - task_key: structured_seed
-          depends_on: [{ task_key: parse_chunk_index }]
+          depends_on: [{ task_key: chunk_merge }]
           environment_key: default
           spark_python_task:
             python_file: etl/structured_seed.py
@@ -156,6 +171,7 @@ resources:
             client: "1"
             dependencies:
               - databricks-sdk>=0.40
+              - pymupdf>=1.24   # Phase 6: parse_fallback
 
     # Phase 4: index one upload library into Lakebase. Triggered by the app (job_parameters
     # library_id) after an upload; one active run per library is enforced by the app.
@@ -181,6 +197,7 @@ resources:
             dependencies:
               - databricks-sdk>=0.70
               - psycopg[binary]>=3.2
+              - pymupdf>=1.24   # Phase 6: parse fallback
 
     mygpt_deploy_embedding:
       name: "[mygpt] Deploy bge-m3 embedding endpoint"
@@ -233,6 +250,25 @@ resources:
             python_file: agents/gateway/driver.py
             parameters:
               ["--task", "chat", "--catalog", "${var.catalog}", "--schema", "${var.schema}",
+               "--base-dir", "${workspace.file_path}"]
+      environments:
+        - environment_key: default
+          spec:
+            client: "1"
+            dependencies:
+              - databricks-sdk>=0.70
+
+    # Phase 6: mygpt-translate -> databricks-gemma-3-12b, the RAG agent's query/answer
+    # translator for non-English corpora (same upstream secret as the other gateways).
+    mygpt_deploy_translate_gateway:
+      name: "[mygpt] Deploy Unity AI Gateway translation endpoint"
+      tasks:
+        - task_key: deploy_translate_gateway
+          environment_key: default
+          spark_python_task:
+            python_file: agents/gateway/driver.py
+            parameters:
+              ["--task", "translate", "--catalog", "${var.catalog}", "--schema", "${var.schema}",
                "--base-dir", "${workspace.file_path}"]
       environments:
         - environment_key: default
@@ -321,6 +357,7 @@ resources:
               - sentence-transformers>=3.0.0
               - torch>=2.3
               - scikit-learn>=1.5
+              - PyStemmer>=2.2
 
     # ---------------------------------------------------------------- Phase 2: eval
     mygpt_eval_build_datasets:
@@ -336,7 +373,7 @@ resources:
                "--datasets", "{{job.parameters.datasets}}"]
       parameters:
         - name: datasets
-          default: "health_policies_fr,health_policies_es,kinase_literature,bioasq"
+          default: "health_policies_fr,health_policies_es,health_policies_hi,kinase_literature,bioasq"
       environments:
         - environment_key: eval
           spec:
@@ -353,6 +390,9 @@ resources:
           default: "0"
         - name: gate
           default: "false"
+        # Phase 6 A/B: auto (dataset config decides) | true | false — applies to every entry.
+        - name: translate
+          default: "auto"
       tasks:
         - task_key: eval
           for_each_task:
@@ -368,7 +408,8 @@ resources:
                   ["--dataset", "{{input.dataset}}", "--model", "{{input.model}}",
                    "--catalog", "${var.catalog}", "--schema", "${var.schema}", "--base-dir", "${workspace.file_path}",
                    "--experiment", "${resources.experiments.mygpt_rag_agent.name}",
-                   "--max-rows", "{{job.parameters.max_rows}}", "--gate", "{{job.parameters.gate}}"]
+                   "--max-rows", "{{job.parameters.max_rows}}", "--gate", "{{job.parameters.gate}}",
+                   "--translate", "{{job.parameters.translate}}"]
       environments:
         - environment_key: eval
           spec:

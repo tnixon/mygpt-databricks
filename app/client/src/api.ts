@@ -14,6 +14,7 @@ export function modelLabel(alias?: string | null): string | undefined {
 
 export const LANGUAGES = [
   'english', 'french', 'spanish', 'portuguese', 'german', 'italian', 'dutch', 'arabic', 'hindi', 'hungarian',
+  'unknown',
 ] as const;
 
 export interface Source {
@@ -84,6 +85,10 @@ export interface AskResponse {
   hi_rf: number | null;
   model: string;
   library_id: string;
+  /** Phase 6: the question as searched / the answer as scored, in the documents' language */
+  documents_language?: string;
+  translated_query?: string | null;
+  translated_answer?: string | null;
   persisted: boolean;
   conversation_id?: string;
   question_id?: string;
@@ -106,9 +111,11 @@ export interface QaTurn {
   question_text: string;
   model: string | null;
   qrs: number | null;
+  translated_question_text: string | null;
   asked_at: string;
   answer_id: string | null;
   answer_text: string | null;
+  translated_answer_text: string | null;
   ars: number | null;
   hi_eq: number | null;
   hi_rf: number | null;

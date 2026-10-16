@@ -9,3 +9,4 @@ transformers>=4.44
 torch>=2.3
 scikit-learn>=1.5          # must load random_forest_hybrid_model_base.pkl; bump if the pickle refuses to load
 numpy>=1.26,<2.0
+PyStemmer>=2.2             # Phase 6: per-language Snowball stemmers for the answer-side BM25

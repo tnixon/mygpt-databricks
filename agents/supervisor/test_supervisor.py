@@ -97,6 +97,20 @@ def test_documents_route_is_verbatim_and_single_hop():
     assert "context" not in co["sources"][0] and co["sources"][0]["source_name"] == "10498895.pdf"
 
 
+def test_language_inputs_forwarded_and_translations_passed_through():
+    rag = rag_response("Oui [1].", corpus="health_policies_fr")
+    rag["custom_outputs"].update({"documents_language": "french", "translated_query": "Le plan ... ?",
+                                  "translated_answer": "Oui [1].", "translate_error": None,
+                                  "reranker": "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"})
+    t = FakeTransport([], rag=rag)
+    resp = ask(t, route="docs", corpus="health_policies_fr", translate=False, query_language="english")
+    ci = t.rag_calls[0]["custom_inputs"]
+    assert ci["translate"] is False and ci["query_language"] == "english"
+    co = resp.custom_outputs
+    assert co["documents_language"] == "french" and co["translated_query"] == "Le plan ... ?"
+    assert co["reranker"].startswith("cross-encoder/mmarco")
+
+
 def test_multi_turn_uses_the_standalone_rewrite():
     t = FakeTransport([{"tool_calls": [tool_call("search_documents", {"query": "Which assay was used for EPHA8?"})]}])
     ask(t, question="and which assay?", history=[{"role": "user", "content": "EPHA8 expression system?"},

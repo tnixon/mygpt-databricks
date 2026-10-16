@@ -9,7 +9,7 @@ import { vector } from '@electric-sql/pglite-pgvector';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { withAdmin, withUser, type Db, type DbClient, type Identity } from './context';
 import { migrate } from './migrate';
-import { Store } from './store';
+import { Store, tsConfigFor } from './store';
 
 const SCHEMA = 'mygpt_test';
 const store = new Store(SCHEMA);
@@ -65,7 +65,8 @@ describe('migrations', () => {
   it('seed the governed corpora as public libraries', async () => {
     const libs = await withUser(db, anon, (q) => store.listLibraries(q));
     expect(libs.map((l) => l.corpus)).toEqual(
-      expect.arrayContaining([null, 'biomed', 'health_policies_fr', 'health_policies_es', 'kinase_literature']),
+      expect.arrayContaining([null, 'biomed', 'health_policies_fr', 'health_policies_es', 'health_policies_hi',
+        'kinase_literature']),
     );
     expect(libs.every((l) => l.kind === 'corpus' && l.visibility === 'public')).toBe(true);
     expect(libs[0].is_default).toBe(true);
@@ -106,8 +107,22 @@ describe('library visibility', () => {
     const fr = await withUser(db, alice, (q) =>
       store.createUploadLibrary(q, alice.email, { name: 'fr', visibility: 'private', documents_language: 'french' }));
     expect(fr.config_dataset).toBe('health_policies_fr');
+    const de = await withUser(db, alice, (q) =>
+      store.createUploadLibrary(q, alice.email, { name: 'de', visibility: 'private', documents_language: 'german' }));
+    expect(de.config_dataset).toBe('default_german');
     expect((await withUser(db, alice, (q) => store.getLibrary(q, privateLib)))?.config_dataset).toBe('mygpt');
     await withUser(db, alice, (q) => store.deleteLibrary(q, fr.id));
+    await withUser(db, alice, (q) => store.deleteLibrary(q, de.id));
+  });
+
+  it("Postgres has a text-search config for every library language (else 'simple')", async () => {
+    const r = await withAdmin(db, (q) => q.query<{ cfgname: string }>('SELECT cfgname FROM pg_ts_config'));
+    const have = new Set(r.rows.map((x) => x.cfgname));
+    for (const lang of ['english', 'french', 'spanish', 'portuguese', 'german', 'italian', 'dutch', 'arabic',
+      'hindi', 'hungarian']) {
+      expect(have.has(tsConfigFor(lang)), lang).toBe(true);
+    }
+    expect(tsConfigFor('unknown')).toBe('simple');
   });
 
   it('public: everyone, including no context', async () => {
@@ -171,6 +186,7 @@ describe('library visibility', () => {
     beforeAll(async () => {
       const turn = (conversation_id: string) => ({
         conversation_id, question_text: 'q?', model: 'sonnet', focus: {}, qrs: 50, answer_text: 'a',
+        translated_question_text: 'q (fr)?', translated_answer_text: 'a (fr)',
         ars: 80, hi_eq: 5, hi_rf: null, model_endpoint: 'x', trace_id: 'tr-1', custom_outputs: {},
         sources: [{ rank: 1, source_name: 'a.pdf', page: 1, snippet: 's' }],
       });
@@ -191,6 +207,8 @@ describe('library visibility', () => {
       const carolView = await withUser(db, carol, (q) => store.getConversation(q, carol.email, sharedConv));
       expect(carolView?.conversation.shared).toBe(true);
       expect(carolView?.turns[0].sources).toHaveLength(1);
+      expect([carolView?.turns[0].translated_question_text, carolView?.turns[0].translated_answer_text])
+        .toEqual(['q (fr)?', 'a (fr)']);
       expect(await withUser(db, carol, (q) => store.getConversation(q, carol.email, privateConv))).toBeNull();
       expect(await withUser(db, carol, (q) => store.deleteConversation(q, sharedConv))).toBe(false);
       await expect(

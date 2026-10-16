@@ -101,7 +101,8 @@ function ConversationView({ id }: { id: string }) {
                 msg={{
                   role: 'assistant', content: t.answer_text ?? '', model: t.model, sources: t.sources, qrs: t.qrs,
                   ars: t.ars, hi_eq: t.hi_eq, hi_rf: t.hi_rf, answer_id: t.answer_id, my_rating: t.my_rating,
-                  my_comment: t.my_comment,
+                  my_comment: t.my_comment, translated_query: t.translated_question_text,
+                  translated_answer: t.translated_answer_text,
                 }}
               />
             </div>

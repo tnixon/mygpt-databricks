@@ -5,9 +5,11 @@ import type { LibraryInput, Visibility } from './db/store';
 export const MODEL_ALIASES = ['sonnet', 'llama', 'gptoss'] as const;
 export type ModelAlias = (typeof MODEL_ALIASES)[number];
 
-// MyGPT's document_languages (models.py), minus 'unknown'.
+// MyGPT's document_languages (models.py). 'unknown' = mixed / unlisted languages: multilingual
+// reranker, no translation, 'simple' text search.
 export const LANGUAGES = [
   'english', 'french', 'spanish', 'portuguese', 'german', 'italian', 'dutch', 'arabic', 'hindi', 'hungarian',
+  'unknown',
 ] as const;
 
 // ai_parse_document formats; spreadsheets / TXT / video arrive with Phase 3.

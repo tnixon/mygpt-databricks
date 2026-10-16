@@ -8,8 +8,12 @@ consumers.
 
   --task embeddings (Phase 1b)  mygpt-embeddings -> mygpt-bge-m3        (llm/v1/embeddings)
   --task chat       (Phase 5)   mygpt-chat       -> databricks-claude-sonnet-5 (llm/v1/chat)
+  --task translate  (Phase 6)   mygpt-translate  -> databricks-gemma-3-12b     (llm/v1/chat)
 
-For chat the driver also sets the AI Gateway features (usage tracking, an inference table
+translate fronts the RAG agent's query/answer translation (gemma-3-12b is the base model
+of MyGPT's translategemma), so the translator can be swapped without redeploying the agent.
+
+For chat and translate the driver also sets the AI Gateway features (usage tracking, an inference table
 in <catalog>.<schema>, a per-user rate limit). Passing --azure-endpoint adds St. Jude's
 Azure AI Foundry deployment as a second served entity at 0% traffic with fallback on, so
 FMAPI stays primary and Azure takes over on upstream errors. Phase-5 spike (2026-10-15):
@@ -27,6 +31,7 @@ PREREQUISITE (one-time, manual — like the Vector Search index creation):
 
 Usage:
     python agents/gateway/driver.py --task embeddings
+    python agents/gateway/driver.py --task translate
     python agents/gateway/driver.py --task chat [--azure-endpoint https://<res>.openai.azure.com --azure-deployment <name>]
 """
 
@@ -56,6 +61,7 @@ TASKS = {
     # task: (default endpoint, default upstream, served-entity name, external-model task)
     "embeddings": ("mygpt-embeddings", "mygpt-bge-m3", "bge-m3-upstream", "llm/v1/embeddings"),
     "chat": ("mygpt-chat", "databricks-claude-sonnet-5", "sonnet", "llm/v1/chat"),
+    "translate": ("mygpt-translate", "databricks-gemma-3-12b", "gemma-3-12b", "llm/v1/chat"),
 }
 
 
@@ -69,7 +75,7 @@ def main() -> None:
     # Same-workspace self-reference; derived from the client host when empty.
     ap.add_argument("--workspace-url", default="")
     ap.add_argument("--token-secret", default="{{secrets/mygpt/gw_upstream_token}}")
-    # chat only: per-user calls per minute across all consumers of the endpoint.
+    # chat / translate: per-user calls per minute across all consumers of the endpoint.
     ap.add_argument("--user-calls-per-minute", type=int, default=60)
     # chat only: the Azure AI Foundry route (Azure OpenAI-compatible deployment). Off when empty.
     ap.add_argument("--azure-endpoint", default="")
@@ -139,7 +145,7 @@ def main() -> None:
         )
         print(f"Created gateway endpoint {endpoint_name} -> {upstream}" + (" (+ azure-foundry)" if azure else ""))
 
-    if args.task == "chat":
+    if task == "llm/v1/chat":
         w.serving_endpoints.put_ai_gateway(
             name=endpoint_name,
             usage_tracking_config=AiGatewayUsageTrackingConfig(enabled=True),

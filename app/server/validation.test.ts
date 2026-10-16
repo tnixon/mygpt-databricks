@@ -18,6 +18,9 @@ describe('parseLibraryInput', () => {
     expect(parseLibraryInput({ name: '' }, [], false).ok).toBe(false);
     expect(parseLibraryInput({ name: 'x', visibility: 'world' }, [], false).ok).toBe(false);
     expect(parseLibraryInput({ name: 'x', documents_language: 'klingon' }, [], false).ok).toBe(false);
+    expect(parseLibraryInput({ name: 'x', documents_language: 'Unknown' }, [], false)).toEqual({
+      ok: true, value: { name: 'x', visibility: 'private', documents_language: 'unknown' },
+    });
     expect(parseLibraryInput({ documents_language: 'french' }, [], true).ok).toBe(false);
     expect(parseLibraryInput({ share_history: true }, [], true)).toEqual({ ok: true, value: { share_history: true } });
   });

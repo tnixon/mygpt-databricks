@@ -46,6 +46,34 @@ def test_dataset_row_counts():
     assert len(eval_datasets.build_records("bioasq", REPO)) == 163
 
 
+def test_hindi_corpus_needs_the_docs_volume():
+    # Public Hindi PDFs live only in the docs volume (make corpus-hi); locally there are none.
+    assert eval_datasets.build_records("health_policies_hi", REPO) == []
+    assert eval_datasets.specs()["health_policies_hi"].use_case == "sj_global"
+
+
+def test_native_language_slice(monkeypatch):
+    monkeypatch.setattr(eval_datasets, "native_questions",
+                        lambda _b: {("1", "french"): "La politique mentionne-t-elle les enfants ?"})
+    monkeypatch.setattr(eval_datasets, "policy_gold", lambda _b: {
+        (d.removesuffix(".pdf"), "Peds_GeneralData"): {"expected_label": "yes", "expected_response": "Yes, …",
+                                                       "mygpt_label": "correct"}
+        for d in os.listdir(os.path.join(REPO, eval_datasets.EVAL_REPO, "health_policies", "inputs", "French_10_pdfs"))})
+    recs = eval_datasets.build_records("health_policies_fr", REPO)
+    native = [r for r in recs if r["tags"].get("query_language")]
+    assert len(recs) == 21 * 10 + 10 and len(native) == 10  # one native question x 10 policies
+    r = native[0]
+    assert r["inputs"]["input"][0]["content"] == "La politique mentionne-t-elle les enfants ?"
+    assert r["inputs"]["custom_inputs"]["query_language"] == "french"
+    assert r["tags"]["gold"] == "native" and r["tags"]["qid"] == "1"
+    assert r["expectations"]["expected_label"] == "yes" and r["expectations"]["gold_scope"] == "label_only"
+    assert "expected_response" not in r["expectations"]
+    assert "written in French" in r["expectations"]["guidelines"][2]
+    # distinct record keys, so run_eval's per-provenance breakdown can find them
+    from run_eval import _records_by_key
+    assert len(_records_by_key(recs)) == len(recs)
+
+
 def test_bioasq_records():
     recs = eval_datasets.build_records("bioasq", REPO)
     types = [r["tags"]["question_type"] for r in recs]

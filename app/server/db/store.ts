@@ -79,9 +79,11 @@ export interface QaTurn {
   model: string | null;
   focus: unknown;
   qrs: number | null;
+  translated_question_text: string | null;
   asked_at: string;
   answer_id: string | null;
   answer_text: string | null;
+  translated_answer_text: string | null;
   ars: number | null;
   hi_eq: number | null;
   hi_rf: number | null;
@@ -101,7 +103,7 @@ export interface LibraryInput {
   documents_language?: string;
 }
 
-/** Postgres text-search configs for MyGPT's document languages (others fall back to simple). */
+/** Postgres text-search configs for MyGPT's document languages (others, incl. 'unknown', fall back to simple). */
 const TS_CONFIGS: Record<string, string> = {
   english: 'english',
   french: 'french',
@@ -120,14 +122,17 @@ export function tsConfigFor(language: string): string {
 }
 
 /**
- * The dataset_config row an upload library is scored with. The rerank / NLI models are
- * English-only, so French / Spanish libraries reuse the governed policy corpora's configs,
- * which turn them off (etl/sql/03_sections_and_config.sql). Other languages fall back to the
- * default until Phase 6 (multilingual) adds per-language configs.
+ * The dataset_config row an upload library is scored with (etl/sql/03_sections_and_config.sql).
+ * French / Spanish libraries reuse the governed policy corpora's configs; other non-English
+ * languages get their `default_<language>` row (multilingual reranker, query/answer
+ * translation; 'unknown' reranks multilingually without translating). English = `mygpt`.
  */
 export function configDatasetFor(language: string): string {
-  return ({ french: 'health_policies_fr', spanish: 'health_policies_es' } as Record<string, string>)[
-    language.toLowerCase()] ?? 'mygpt';
+  const lang = language.toLowerCase();
+  const fixed: Record<string, string> = {
+    english: 'mygpt', french: 'health_policies_fr', spanish: 'health_policies_es',
+  };
+  return fixed[lang] ?? `default_${lang}`;
 }
 
 const LIB_COLS = `l.id, l.name, l.description, l.owner_email, l.visibility, l.group_name, l.share_history,
@@ -350,7 +355,9 @@ export class Store {
       model: string;
       focus: unknown;
       qrs: number | null;
+      translated_question_text?: string | null;
       answer_text: string;
+      translated_answer_text?: string | null;
       ars: number | null;
       hi_eq: number | null;
       hi_rf: number | null;
@@ -362,16 +369,18 @@ export class Store {
   ): Promise<{ question_id: string; answer_id: string }> {
     const s = this.schema;
     const qr = await q.query<{ id: string }>(
-      `INSERT INTO ${s}.questions (conversation_id, question_text, model, focus, qrs)
-       VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-      [turn.conversation_id, turn.question_text, turn.model, JSON.stringify(turn.focus ?? null), turn.qrs],
+      `INSERT INTO ${s}.questions (conversation_id, question_text, model, focus, qrs, translated_question_text)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+      [turn.conversation_id, turn.question_text, turn.model, JSON.stringify(turn.focus ?? null), turn.qrs,
+       turn.translated_question_text ?? null],
     );
     const questionId = qr.rows[0].id;
     const ar = await q.query<{ id: string }>(
-      `INSERT INTO ${s}.answers (question_id, answer_text, ars, hi_eq, hi_rf, model_endpoint, trace_id, custom_outputs)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+      `INSERT INTO ${s}.answers (question_id, answer_text, ars, hi_eq, hi_rf, model_endpoint, trace_id, custom_outputs,
+                                 translated_answer_text)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
       [questionId, turn.answer_text, turn.ars, turn.hi_eq, turn.hi_rf, turn.model_endpoint, turn.trace_id,
-       JSON.stringify(turn.custom_outputs ?? null)],
+       JSON.stringify(turn.custom_outputs ?? null), turn.translated_answer_text ?? null],
     );
     const answerId = ar.rows[0].id;
     if (turn.sources.length > 0) {
@@ -427,8 +436,10 @@ export class Store {
     const conversation = cr.rows[0];
     if (!conversation) return null;
     const tr = await q.query<QaTurn>(
-      `SELECT qq.id AS question_id, qq.question_text, qq.model, qq.focus, qq.qrs, qq.created_at AS asked_at,
-              a.id AS answer_id, a.answer_text, a.ars, a.hi_eq, a.hi_rf, a.model_endpoint, a.trace_id,
+      `SELECT qq.id AS question_id, qq.question_text, qq.model, qq.focus, qq.qrs, qq.translated_question_text,
+              qq.created_at AS asked_at,
+              a.id AS answer_id, a.answer_text, a.translated_answer_text, a.ars, a.hi_eq, a.hi_rf, a.model_endpoint,
+              a.trace_id,
               coalesce((SELECT json_agg(json_build_object(
                          'rank', so.rank, 'source_name', so.source_name, 'corpus', so.corpus, 'section', so.section,
                          'page', so.page, 'snippet', so.snippet, 'vector_score', so.vector_score,

@@ -19,7 +19,7 @@ KINASE_PDFS ?=   # dir of St. Jude's kinase PDFs, named <pubmed_id>.pdf (not in 
 
 .DEFAULT_GOAL := help
 
-.PHONY: help init submodules submodules-update install dev build typecheck lint test validate deploy clean eval-corpus eval-private eval-test
+.PHONY: help init submodules submodules-update install dev build typecheck lint test validate deploy clean eval-corpus corpus-hi eval-private eval-test
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -68,9 +68,13 @@ eval-corpus: ## Upload the Phase-2 eval corpora to the docs volume (PROFILE=<nam
 	  databricks fs cp -r --overwrite "$(KINASE_PDFS)" $(DOCS_VOLUME)/kinase_literature --profile $(PROFILE); \
 	else echo "KINASE_PDFS not set — skipping kinase_literature (St. Jude to provide the PDFs)"; fi
 
+corpus-hi: ## Upload the Phase-6 public Hindi health-policy PDFs to the docs volume (PROFILE=<name>, HI_PDFS=<dir>)
+	@test -n "$(HI_PDFS)" || (echo "set HI_PDFS=<dir of public Hindi PDFs> (see etl/README.md, health_policies_hi)"; exit 1)
+	databricks fs cp -r --overwrite "$(HI_PDFS)" $(DOCS_VOLUME)/health_policies_hi --profile $(PROFILE)
+
 eval-private: ## Upload St. Jude's private ground truths to the restricted eval_private volume (PROFILE=<name>)
 	@test -d "$(EVAL_PRIVATE)" || (echo "missing $(EVAL_PRIVATE) (St. Jude's private ground truths)"; exit 1)
 	databricks fs cp -r --overwrite "$(EVAL_PRIVATE)" $(PRIVATE_VOLUME) --profile $(PROFILE)
 
-eval-test: ## Unit-test the eval harness, agent scoring / provided-sources, Supervisor + tools (no workspace needed)
-	uv run --no-project --with-requirements eval/requirements.txt pytest -q eval/ agents/rag_agent/test_scoring.py agents/rag_agent/test_provided_sources.py agents/supervisor/test_supervisor.py agents/tools/test_tools.py
+eval-test: ## Unit-test the eval harness, agent scoring / provided-sources / multilingual, Supervisor + tools, ETL parse fallback (no workspace needed)
+	uv run --no-project --with-requirements eval/requirements.txt --with PyStemmer --with pymupdf pytest -q eval/ agents/rag_agent/test_scoring.py agents/rag_agent/test_provided_sources.py agents/rag_agent/test_multilingual.py agents/supervisor/test_supervisor.py agents/tools/test_tools.py etl/test_parse_fallback.py

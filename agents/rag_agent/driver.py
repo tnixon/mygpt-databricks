@@ -58,6 +58,9 @@ def main() -> None:
     # chat endpoint (usage tracking, inference table, Azure fallback). agent.py reads
     # MYGPT_LLM_SONNET. The llama / gptoss aliases stay direct for the eval model matrix.
     ap.add_argument("--chat-endpoint", default="mygpt-chat")
+    # Phase 6: query/answer translation for non-English corpora (gateway -> gemma-3-12b).
+    # agent.py reads MYGPT_TRANSLATE_ENDPOINT.
+    ap.add_argument("--translate-endpoint", default="mygpt-translate")
     # Phase 2: one shared experiment holds the LoggedModels, the eval runs (eval/), and
     # the endpoint's production traces (pinned via MLFLOW_EXPERIMENT_ID below).
     # Declared as a DABs resource in databricks.yml.
@@ -87,6 +90,7 @@ def main() -> None:
         DatabricksServingEndpoint(endpoint_name=args.embed_endpoint),
         DatabricksServingEndpoint(endpoint_name=args.vs_embed_endpoint),
         DatabricksServingEndpoint(endpoint_name=args.chat_endpoint),
+        DatabricksServingEndpoint(endpoint_name=args.translate_endpoint),
         DatabricksServingEndpoint(endpoint_name="databricks-claude-sonnet-5"),
         DatabricksServingEndpoint(endpoint_name="databricks-llama-4-maverick"),
         DatabricksServingEndpoint(endpoint_name="databricks-gpt-oss-120b"),
@@ -119,6 +123,7 @@ def main() -> None:
             "MYGPT_VS_ENDPOINT": args.vs_endpoint,
             "MYGPT_EMBED_ENDPOINT": args.embed_endpoint,
             "MYGPT_LLM_SONNET": args.chat_endpoint,
+            "MYGPT_TRANSLATE_ENDPOINT": args.translate_endpoint,
             "MYGPT_RF_MODEL_PATH": "/model/artifacts/rf_model/random_forest_hybrid_model_base.pkl",
             # Pin production traces to the shared experiment explicitly: agents.deploy
             # otherwise keeps the experiment already attached to an existing endpoint
