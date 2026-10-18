@@ -20,6 +20,8 @@ A single MyGPT app → a multi-agent **Supervisor** routes each query across **D
 - Foundation models available in-workspace via FMAPI (Claude, Llama, Qwen, GPT-OSS, Gemma) + embeddings (GTE / BGE / Qwen3).
 
 ## Setup
+Deploying to a new workspace: follow [`DEPLOYMENT.md`](DEPLOYMENT.md) (ordered steps, bundle per step, resources created).
+
 The reference sources live in `reference/` as **git submodules**, so clone recursively:
 ```bash
 git clone --recurse-submodules <repo-url>
