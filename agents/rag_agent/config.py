@@ -36,7 +36,8 @@ class DatasetConfig:
     cutoffs: EmbeddingCutoffs
     reranker_cutoff: float
     translate_query: bool = False
-    answer_bm25: bool = True
+    translate_answer: bool = False
+    answer_bm25: bool = False
 
 
 RERANK_MODEL = "cross-encoder/qnli-electra-base"
@@ -74,7 +75,8 @@ def _fallback(dataset_name: str) -> DatasetConfig:
         cutoffs=_DEFAULT_CUTOFFS,
         reranker_cutoff=RERANK_CUTOFFS[reranker],
         translate_query=language in TRANSLATABLE and language != "english",
-        answer_bm25=True,
+        translate_answer=False,
+        answer_bm25=False,
     )
 
 
@@ -140,7 +142,8 @@ def load_dataset_config(dataset_name: str = "mygpt") -> DatasetConfig:
             ),
             reranker_cutoff=float(rk_rows[0]["cutoff_score"]) if rk_rows else RERANK_CUTOFFS.get(str(d["reranker"]), 0.10),
             translate_query=_as_bool(d.get("translate_query", False)),
-            answer_bm25=_as_bool(d.get("answer_bm25", True)),
+            translate_answer=_as_bool(d.get("translate_answer", False)),
+            answer_bm25=_as_bool(d.get("answer_bm25", False)),
         )
     except Exception as exc:  # noqa: BLE001 - never let config fail the endpoint
         print(f"[config] falling back to defaults: {type(exc).__name__}: {exc}")

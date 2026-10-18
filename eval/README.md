@@ -165,8 +165,9 @@ databricks jobs run-now -p mygpt --json '{"job_id": <mygpt_eval job id>, "job_pa
 - **Native-language slice.** Once `native_questions.csv` exists, FR/ES gain the base questions
   asked in French or Spanish. They're tagged `gold = native` (giving
   `yes_no_correct/native/mean`) and inherit the yes/no label only.
-- **Re-baseline.** Re-baseline every dataset after deploying Phase 6: the answer-side BM25
-  (`answer_bm25`) moves ARS/HI for English corpora too. Reset `gates.yaml` from the new runs.
+- **Re-baseline.** Re-baseline FR/ES after deploying Phase 6 (the reranker and translation
+  change their scores). English corpora only change if `answer_bm25` is turned on (off by
+  default). Reset `gates.yaml` from the new runs.
 
 ## Blocked on St. Jude (BlueSky)
 - `kinase_literature/inputs/expression_systems_list.csv`, the Q11 vocabulary that

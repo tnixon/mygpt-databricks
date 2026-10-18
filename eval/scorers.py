@@ -386,8 +386,10 @@ _GROUNDING_GUIDELINES = Guidelines(
     guidelines=[
         "The response only states facts that are supported by the documents the assistant retrieved; "
         "if the documents don't cover the question, it says so instead of guessing.",
-        "The response answers in the language of the question, even when the source documents "
-        "are in another language.",
+        # Natural language only: "the language of the question" alone made the judge read it as
+        # "follows the question's instructions" (84/210 FR rows failed on v15, 2026-10-17).
+        "The response is written in the same natural language as the user's question (e.g. English "
+        "or French), even when the source documents are in another language.",
     ],
 )
 

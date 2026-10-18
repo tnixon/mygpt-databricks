@@ -17,8 +17,10 @@ trust metrics and per-source scores via ``custom_outputs``:
 
 Phase 6 (multilingual): when the dataset's documents aren't in the question's language,
 the question is translated into the document language (``mygpt-translate``) for retrieval
-and rerank, and the answer is translated the same way for ARS scoring only — MyGPT's
-translategemma flow. The user-facing answer stays in the question's language.
+and rerank. The user-facing answer stays in the question's language. MyGPT also translates
+the answer for ARS scoring (``translate_answer``); that is off by default because it
+regenerates the whole answer (~18 s on gemma-3-12b in the 2026-10-17 live check), and bge-m3
+scores the cross-lingual answer directly.
 
 The scoring math, config loader, and random-forest HI are INLINED here (rather than
 imported from scoring.py / config.py / hi_random_forest.py) because MLflow imports
@@ -28,8 +30,9 @@ reference these inlined functions mirror — keep them in sync.
 
 Fidelity = Balanced (see PLAN.md): the question-side BM25 term is derived from AI Search
 hybrid scores rescored per source rather than a separate full-corpus bm25s index. The
-answer-side term is a real stemmed BM25 of the answer over the retrieved contexts, as in
-MyGPT (``answer_bm25``).
+answer-side term can be a real stemmed BM25 of the answer over the retrieved contexts, as in
+MyGPT (``answer_bm25``); off by default until bm25_best/worst are calibrated for it — with
+the bootstrap window ARS saturated at 100 on English answers (2026-10-17).
 """
 
 from __future__ import annotations
@@ -310,7 +313,8 @@ class DatasetConfig:
     cutoffs: EmbeddingCutoffs
     reranker_cutoff: float
     translate_query: bool = False
-    answer_bm25: bool = True
+    translate_answer: bool = False
+    answer_bm25: bool = False
 
 
 def dataset_language(dataset_name: str) -> str:
@@ -334,7 +338,8 @@ def _config_fallback(dataset_name: str) -> DatasetConfig:
         dataset_name=dataset_name, embedding_model="bge-m3", reranker=reranker, use_bm25=True,
         use_reranker=True, documents_language=language, hi_by_equation=True,
         scoring=ScoringConfig(), cutoffs=_DEFAULT_CUTOFFS, reranker_cutoff=RERANK_CUTOFFS[reranker],
-        translate_query=language in LANGUAGES and language != "english", answer_bm25=True,
+        translate_query=language in LANGUAGES and language != "english", translate_answer=False,
+        answer_bm25=False,
     )
 
 
@@ -380,7 +385,8 @@ def load_dataset_config(dataset_name: str, workspace) -> DatasetConfig:
             ),
             reranker_cutoff=float(rk[0]["cutoff_score"]) if rk else RERANK_CUTOFFS.get(str(d["reranker"]), 0.10),
             translate_query=_as_bool(d.get("translate_query", False)),
-            answer_bm25=_as_bool(d.get("answer_bm25", True)),
+            translate_answer=_as_bool(d.get("translate_answer", False)),
+            answer_bm25=_as_bool(d.get("answer_bm25", False)),
         )
     except Exception as exc:  # noqa: BLE001
         print(f"[config] fallback to defaults: {type(exc).__name__}: {exc}")
@@ -643,7 +649,8 @@ class MyGPTRagAgent(ResponsesAgent):
         cfg = self._config(dataset)
         model_endpoint = MODEL_ALIASES.get(model_alias, MODEL_ALIASES["sonnet"])
         # Phase 6: questions are assumed English (MyGPT's assumption) unless the caller says
-        # otherwise; `translate: false` turns translation off for eval A/B runs.
+        # otherwise; `translate: false` turns translation off for eval A/B runs, and
+        # `translate_answer` overrides the config's answer-for-scoring translation.
         query_language = str(ci.get("query_language") or "english").lower()
         doc_language = cfg.documents_language
         translate = (
@@ -666,10 +673,11 @@ class MyGPTRagAgent(ResponsesAgent):
         translated_query, translate_errors = None, []
         search_query = query
         if translate:
-            translated_query, err = self._translate(query, query_language, doc_language)
-            search_query = translated_query
-            if err:
+            translated, err = self._translate(query, query_language, doc_language)
+            if err:  # search with the original question; report no translation
                 translate_errors.append(f"query: {err}")
+            else:
+                translated_query = search_query = translated
         language_outputs = {
             "documents_language": doc_language, "translated_query": translated_query,
             "translate_error": "; ".join(translate_errors) or None,
@@ -693,15 +701,17 @@ class MyGPTRagAgent(ResponsesAgent):
         qrs, question_semantic, sources = self._score_question(sources, cfg)
         # The model sees the original question, so it answers in the user's language.
         answer = self._generate(query, sources, model_alias, instructions)
-        # ...and the answer is scored in the documents' language (MyGPT scores the
-        # translated answer: embedding distance, BM25 and NLI).
+        # ...and, with translate_answer, scored in the documents' language (MyGPT scores the
+        # translated answer: embedding distance, BM25 and NLI). Off by default (latency).
         translated_answer, scored_answer = None, answer
-        if translate and answer:
-            translated_answer, err = self._translate(answer, query_language, doc_language)
-            scored_answer = translated_answer
-            if err:
+        translate_answer = translate and _as_bool(ci.get("translate_answer", cfg.translate_answer))
+        if translate_answer and answer:
+            translated, err = self._translate(answer, query_language, doc_language)
+            if err:  # score the original answer
                 translate_errors.append(f"answer: {err}")
                 language_outputs["translate_error"] = "; ".join(translate_errors)
+            else:
+                translated_answer = scored_answer = translated
         ans = self._score_answer(scored_answer, sources, question_semantic, cfg)
         for s, label in zip(sources, ans["nli"]):
             s["nli"] = label

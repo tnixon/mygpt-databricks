@@ -6,6 +6,7 @@ with a fake workspace transport and fake cross-encoders — no torch, no endpoin
 
 from __future__ import annotations
 
+import dataclasses
 import json
 
 import mlflow
@@ -80,6 +81,8 @@ def test_packaged_config_is_language_driven():
     fr = ag._config_fallback("health_policies_fr")
     assert (fr.documents_language, fr.reranker, fr.reranker_cutoff, fr.translate_query) == (
         "french", ag.RERANK_MODEL_MULTILINGUAL, 0.05, True)
+    # answer translation + answer-side BM25 are opt-in (latency / uncalibrated BM25 window)
+    assert not fr.translate_answer and not fr.answer_bm25
     en = ag._config_fallback("kinase_literature")
     assert (en.reranker, en.reranker_cutoff, en.translate_query) == (ag.RERANK_MODEL, 0.10, False)
     assert ag._config_fallback("default_german").documents_language == "german"
@@ -87,23 +90,34 @@ def test_packaged_config_is_language_driven():
     assert unk.reranker == ag.RERANK_MODEL_MULTILINGUAL and not unk.translate_query
 
 
-def test_english_question_on_french_corpus_is_translated_both_ways():
+def test_english_question_on_french_corpus_translates_the_query_only():
     api = FakeApi(fr_rows())
     out = ask(make_agent(api), "Does the policy mention children?", corpus="health_policies_fr")
     # the translated query drives retrieval (and rerank)...
     assert api.paths("/vector-search/")[0]["query_text"] == "FR<Does the policy mention children?>"
     assert out["translated_query"] == "FR<Does the policy mention children?>"
-    # ...the model sees the original question, and the answer is translated for scoring only.
+    # ...the model sees the original question; by default the answer isn't translated.
     chat = [b for p, b in api.calls if "/serving-endpoints/" in p and ag.TRANSLATE_ENDPOINT not in p][0]
     assert "Question: Does the policy mention children?" in chat["messages"][0]["content"]
     assert out["answer"] == "Yes. The policy covers childhood cancer [1]."
-    assert out["translated_answer"] == "FR<Yes. The policy covers childhood cancer [1].>"
+    assert out["translated_answer"] is None and len(api.paths(ag.TRANSLATE_ENDPOINT)) == 1
     assert out["documents_language"] == "french" and out["translate_error"] is None
     assert out["reranker"] == ag.RERANK_MODEL_MULTILINGUAL
     src = out["sources"][0]
     assert src["rerank_score"] == 0.9 and src["reranker"] == ag.RERANK_MODEL_MULTILINGUAL
     assert src["nli"] is None  # NLI is English-only
-    assert src["answer_bm25_score"] is not None
+    assert src["answer_bm25_score"] is None  # answer_bm25 off by default
+
+
+def test_translate_answer_and_answer_bm25_opt_in():
+    api = FakeApi(fr_rows())
+    a = make_agent(api)
+    a._cfg_cache["health_policies_fr"] = dataclasses.replace(ag._config_fallback("health_policies_fr"), answer_bm25=True)
+    out = ask(a, "Does the policy mention children?", corpus="health_policies_fr", translate_answer=True)
+    # the answer is translated for scoring only (MyGPT); the user still gets the original
+    assert out["answer"] == "Yes. The policy covers childhood cancer [1]."
+    assert out["translated_answer"] == "FR<Yes. The policy covers childhood cancer [1].>"
+    assert out["sources"][0]["answer_bm25_score"] is not None
 
 
 def test_translate_false_and_same_language_skip_translation():
@@ -121,8 +135,10 @@ def test_translation_failure_degrades_to_original_text():
     api = FakeApi(fr_rows(), fail_translate=True)
     out = ask(make_agent(api), "Does the policy mention children?", corpus="health_policies_fr")
     assert api.paths("/vector-search/")[0]["query_text"] == "Does the policy mention children?"
-    assert "query: RuntimeError: gateway down" in out["translate_error"]
-    assert "answer: RuntimeError" in out["translate_error"]
+    assert "query: RuntimeError: gateway down" in out["translate_error"] and out["translated_query"] is None
+    out2 = ask(make_agent(FakeApi(fr_rows(), fail_translate=True)), "Does the policy mention children?",
+               corpus="health_policies_fr", translate_answer=True)
+    assert "answer: RuntimeError" in out2["translate_error"] and out2["translated_answer"] is None
     assert out["answer"].startswith("Yes.") and out["qrs"] is not None
 
 

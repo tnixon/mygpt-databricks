@@ -12,59 +12,62 @@
 --   * non-English corpora rerank with MyGPT's multilingual default,
 --     mmarco-mMiniLMv2-L12-H384-v1 (qnli-electra-base is English-only); NLI stays English-only;
 --   * translate_query: the agent translates the question into documents_language for
---     retrieval/rerank, and the answer likewise for ARS scoring (MyGPT's translategemma flow);
---   * answer_bm25: ARS keyword term = stemmed BM25 of the answer over the retrieved contexts;
+--     retrieval/rerank (MyGPT's translategemma flow);
+--   * translate_answer: also translate the answer for ARS scoring, as MyGPT does. Off: it
+--     regenerates the whole answer (~18 s on gemma-3-12b, 2026-10-17 live check);
+--   * answer_bm25: ARS keyword term = stemmed BM25 of the answer over the retrieved contexts.
+--     Off until bm25_best/worst are calibrated for it (ARS saturated at 100 on English);
 --   * default_<language> rows are the configs for upload libraries in that language
 --     (app/server/db/store.ts configDatasetFor). 'unknown' reranks multilingually, no translation.
 CREATE OR REPLACE TABLE structural_biology.mygpt.dataset_config AS
 SELECT * FROM VALUES
   ('mygpt', 'bge-m3', 'structure_preserving', 1000, false, true, true,
    'cross-encoder/qnli-electra-base', 'english', 'cosine',
-   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true, false, true),
+   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true, false, false, false),
   ('biomed', 'bge-m3', 'structure_preserving', 1000, false, true, true,
    'cross-encoder/qnli-electra-base', 'english', 'cosine',
-   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true, false, true),
+   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true, false, false, false),
   ('health_policies_fr', 'bge-m3', 'structure_preserving', 1000, false, true, true,
    'cross-encoder/mmarco-mMiniLMv2-L12-H384-v1', 'french', 'cosine',
-   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true, true, true),
+   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true, true, false, false),
   ('health_policies_es', 'bge-m3', 'structure_preserving', 1000, false, true, true,
    'cross-encoder/mmarco-mMiniLMv2-L12-H384-v1', 'spanish', 'cosine',
-   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true, true, true),
+   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true, true, false, false),
   ('health_policies_hi', 'bge-m3', 'structure_preserving', 1000, false, true, true,
    'cross-encoder/mmarco-mMiniLMv2-L12-H384-v1', 'hindi', 'cosine',
-   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true, true, true),
+   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true, true, false, false),
   ('kinase_literature', 'bge-m3', 'structure_preserving', 1000, false, true, true,
    'cross-encoder/qnli-electra-base', 'english', 'cosine',
-   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true, false, true),
+   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true, false, false, false),
   ('default_portuguese', 'bge-m3', 'structure_preserving', 1000, false, true, true,
    'cross-encoder/mmarco-mMiniLMv2-L12-H384-v1', 'portuguese', 'cosine',
-   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true, true, true),
+   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true, true, false, false),
   ('default_german', 'bge-m3', 'structure_preserving', 1000, false, true, true,
    'cross-encoder/mmarco-mMiniLMv2-L12-H384-v1', 'german', 'cosine',
-   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true, true, true),
+   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true, true, false, false),
   ('default_italian', 'bge-m3', 'structure_preserving', 1000, false, true, true,
    'cross-encoder/mmarco-mMiniLMv2-L12-H384-v1', 'italian', 'cosine',
-   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true, true, true),
+   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true, true, false, false),
   ('default_dutch', 'bge-m3', 'structure_preserving', 1000, false, true, true,
    'cross-encoder/mmarco-mMiniLMv2-L12-H384-v1', 'dutch', 'cosine',
-   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true, true, true),
+   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true, true, false, false),
   ('default_arabic', 'bge-m3', 'structure_preserving', 1000, false, true, true,
    'cross-encoder/mmarco-mMiniLMv2-L12-H384-v1', 'arabic', 'cosine',
-   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true, true, true),
+   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true, true, false, false),
   ('default_hindi', 'bge-m3', 'structure_preserving', 1000, false, true, true,
    'cross-encoder/mmarco-mMiniLMv2-L12-H384-v1', 'hindi', 'cosine',
-   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true, true, true),
+   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true, true, false, false),
   ('default_hungarian', 'bge-m3', 'structure_preserving', 1000, false, true, true,
    'cross-encoder/mmarco-mMiniLMv2-L12-H384-v1', 'hungarian', 'cosine',
-   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true, true, true),
+   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true, true, false, false),
   ('default_unknown', 'bge-m3', 'structure_preserving', 1000, false, true, true,
    'cross-encoder/mmarco-mMiniLMv2-L12-H384-v1', 'unknown', 'cosine',
-   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true, false, true)
+   4.0, -4.0, -1.0, 5.0, -2.0, 0.0, 1.0, 2.0, true, false, false, false)
 AS t(dataset_name, embedding_model, chunking_method, chunksize, overlap, use_bm25, use_reranker,
       reranker, documents_language, distance_function,
       coefficient_a_Qsem, coefficient_b_Qkey, coefficient_c_Qrank,
       coefficient_x_Asem, coefficient_y_Akey, coefficient_z_Arank,
-      coefficient_p_QRS, coefficient_q_ARS, HI_by_equation, translate_query, answer_bm25);
+      coefficient_p_QRS, coefficient_q_ARS, HI_by_equation, translate_query, translate_answer, answer_bm25);
 
 -- Per-embedding-model distance calibration (best/worst, question & answer windows).
 -- bge-m3 values are BOOTSTRAP placeholders in cosine-DISTANCE space (= 1 - cosine
