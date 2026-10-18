@@ -7,7 +7,7 @@ env:
     valueFrom: serving-endpoint-llama
   - name: DATABRICKS_SERVING_ENDPOINT_GPTOSS
     valueFrom: serving-endpoint-gptoss
-  # The MyGPT retrieval+scoring ResponsesAgent endpoint (grounded path).
+  # The MyGPT Supervisor endpoint (grounded path): documents / Genie / tools routing.
   - name: MYGPT_AGENT_ENDPOINT
     valueFrom: agent-endpoint
   - name: MYGPT_SCHEMA

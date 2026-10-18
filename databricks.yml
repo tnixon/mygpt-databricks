@@ -17,7 +17,7 @@
 #   (Phase 5) databricks bundle run mygpt_deploy_chat_gateway -p mygpt   # mygpt-chat (AI Gateway)
 #   (Phase 5) databricks bundle run mygpt_deploy_tools -p mygpt          # UC-function tools (managed MCP)
 #   (Phase 5) databricks bundle run mygpt_deploy_genie -p mygpt          # Genie space over the seed tables
-#   (Phase 5) databricks bundle run mygpt_deploy_supervisor -p mygpt     # mygpt-supervisor
+#   (Phase 5) databricks bundle run mygpt_deploy_supervisor -p mygpt     # mygpt-supervisor (the app's backend)
 #   databricks bundle run mygpt_eval_build_datasets -p mygpt   # Phase 2: UC eval datasets
 #   databricks bundle run mygpt_eval -p mygpt                  # Phase 2: eval runs (+ gates)
 #   databricks bundle run mygpt_eval_monitor -p mygpt          # Phase 2: production monitoring

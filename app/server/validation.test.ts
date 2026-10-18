@@ -32,10 +32,20 @@ describe('parseAskInput', () => {
     expect(r).toEqual({
       ok: true,
       value: { question: 'hi', model: 'sonnet', k: 5, focus: { documents: [], section: undefined },
-        library_id: undefined, conversation_id: undefined },
+        route: 'auto', library_ids: [], conversation_id: undefined },
     });
-    expect(parseAskInput({ question: 'q', library_id: 'nope' }).ok).toBe(false);
+    expect(parseAskInput({ question: 'q', library_ids: ['nope'] }).ok).toBe(false);
+    expect(parseAskInput({ question: 'q', library_ids: 'x' }).ok).toBe(false);
     expect(parseAskInput({ question: '' }).ok).toBe(false);
+  });
+
+  it('dedupes and caps library_ids, and defaults unknown routes to auto', () => {
+    const id = (n: number) => `00000000-0000-0000-0000-${String(n).padStart(12, '0')}`;
+    const r = parseAskInput({ question: 'q', library_ids: [id(1), id(1), id(2)], route: 'genie' });
+    expect(r.ok && [r.value.library_ids, r.value.route]).toEqual([[id(1), id(2)], 'genie']);
+    const bad = parseAskInput({ question: 'q', route: 'sql' });
+    expect(bad.ok && bad.value.route).toBe('auto');
+    expect(parseAskInput({ question: 'q', library_ids: Array.from({ length: 9 }, (_, i) => id(i)) }).ok).toBe(false);
   });
 });
 

@@ -3,7 +3,7 @@
     python agents/supervisor/smoke_test.py --profile mygpt [--only documents]
 
 Checks custom_outputs.route and the per-route payload (RAG scores passed through verbatim,
-Genie SQL + rows, tool results, a proposed-but-unexecuted action). Prints each answer.
+Genie SQL + rows, tool results, library selection across two libraries). Prints each answer.
 """
 
 from __future__ import annotations
@@ -18,10 +18,14 @@ CASES = [
      lambda co: (co.get("genie") or {}).get("status") == "COMPLETED" and co["genie"]["rows"]),
     ("tools", "Which PDB structures exist for human ABL1?", {},
      lambda co: any(c["name"] == "search_pdb_by_gene" and c["ok"] for c in co["tool_calls"])),
-    ("libraries", "Create a private library called Smoke test", {
-        "libraries": [{"id": "1", "name": "All governed documents", "kind": "corpus", "visibility": "public"}],
-        "allow_actions": True},
-     lambda co: [a["action"] for a in co["actions"]] == ["create_library"]),
+    # Two selected libraries: a kinase question should search the kinase one (alone, verbatim).
+    ("documents", "Which expression system was used to produce recombinant EPHA8 kinase?", {"libraries": [
+        {"id": "biomed", "name": "Biomedical seed (BioASQ)", "kind": "corpus", "corpus": "biomed", "dataset": "biomed",
+         "description": "BioASQ biomedical seed corpus."},
+        {"id": "kinase", "name": "BlueSky kinase literature", "kind": "corpus", "corpus": "kinase_literature",
+         "dataset": "kinase_literature", "description": "BlueSky kinase papers."}]},
+     lambda co: "kinase" in [x["library_id"] for x in co["libraries_searched"]]
+     and all(s.get("library_id") for s in co["sources"])),
 ]
 
 
@@ -49,7 +53,7 @@ def main() -> None:
         print(f"       {text[:200]!r}")
         if not ok:
             failed.append(route)
-            print("       custom_outputs:", json.dumps({k: co.get(k) for k in ("error", "retrieve_error", "genie", "actions")}, default=str)[:600])
+            print("       custom_outputs:", json.dumps({k: co.get(k) for k in ("error", "retrieve_error", "genie", "libraries_searched")}, default=str)[:600])
     if failed:
         raise SystemExit(f"FAILED: {failed}")
     print("OK")

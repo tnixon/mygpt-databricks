@@ -70,7 +70,7 @@ export function HistoryPage() {
               )}
             </CardTitle>
             <CardDescription>
-              {c.library_name ?? 'deleted library'} · {c.n_questions} question{c.n_questions === 1 ? '' : 's'} ·{' '}
+              {c.library_name ?? ((c.library_ids?.length ?? 0) > 1 ? `${c.library_ids!.length} libraries` : 'deleted library')} · {c.n_questions} question{c.n_questions === 1 ? '' : 's'} ·{' '}
               {new Date(c.last_at).toLocaleString()}
             </CardDescription>
           </CardHeader>
@@ -102,7 +102,7 @@ function ConversationView({ id }: { id: string }) {
                   role: 'assistant', content: t.answer_text ?? '', model: t.model, sources: t.sources, qrs: t.qrs,
                   ars: t.ars, hi_eq: t.hi_eq, hi_rf: t.hi_rf, answer_id: t.answer_id, my_rating: t.my_rating,
                   my_comment: t.my_comment, translated_query: t.translated_question_text,
-                  translated_answer: t.translated_answer_text,
+                  translated_answer: t.translated_answer_text, ...(t.custom_outputs ?? {}),
                 }}
               />
             </div>

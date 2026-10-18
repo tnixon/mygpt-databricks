@@ -336,4 +336,19 @@ SET config_dataset = 'default_' || documents_language, updated_at = now()
 WHERE kind = 'upload' AND config_dataset = 'mygpt' AND documents_language <> 'english';
 `,
   },
+  {
+    // The Supervisor: a conversation searches a SET of libraries (library_ids), and each source
+    // records the library it came from. Sharing still keys on library_id, which the app sets
+    // only for single-library conversations: a multi-library one stays owner-only, so content
+    // from a private library in the set can't reach members of a shared one.
+    id: '005_supervisor',
+    sql: `
+SELECT set_config('mygpt.role', 'admin', true);
+ALTER TABLE {{schema}}.conversations ADD COLUMN IF NOT EXISTS library_ids uuid[];
+UPDATE {{schema}}.conversations SET library_ids = ARRAY[library_id]
+WHERE library_ids IS NULL AND library_id IS NOT NULL;
+ALTER TABLE {{schema}}.sources
+  ADD COLUMN IF NOT EXISTS library_id uuid REFERENCES {{schema}}.libraries ON DELETE SET NULL;
+`,
+  },
 ];

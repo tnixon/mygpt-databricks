@@ -1,9 +1,13 @@
-// Client for the MyGPT retrieval+scoring ResponsesAgent endpoint.
+// Client for the MyGPT Supervisor ResponsesAgent endpoint (agents/supervisor/supervisor_agent.py).
+// It routes each question to the libraries' documents (one mygpt-rag-agent call per library it
+// picks), Genie or the UC-function tools, and passes the RAG scores through.
 
 import { createWorkspaceClient } from '@databricks/appkit';
 import { config } from './config';
 
 export interface AgentSource {
+  library_id?: string | null;
+  library_name?: string | null;
   source_name?: string;
   corpus?: string;
   section?: string;
@@ -15,12 +19,58 @@ export interface AgentSource {
   nli?: string | null;
 }
 
+/** One searched library: its own RAG scores (custom_outputs.libraries_searched). */
+export interface LibrarySearched {
+  library_id: string | null;
+  name: string | null;
+  kind?: string;
+  query?: string;
+  /** its sources are custom_outputs.sources[first_source - 1 … + n_sources] (global [n]) */
+  first_source: number;
+  n_sources: number;
+  qrs?: number | null;
+  ars?: number | null;
+  hi_eq?: number | null;
+  hi_rf?: number | null;
+  trace_id?: string | null;
+  retrieve_error?: string | null;
+  documents_language?: string | null;
+  translated_query?: string | null;
+  translated_answer?: string | null;
+}
+
+export interface GenieResult {
+  status?: string;
+  text?: string;
+  sql?: string | null;
+  description?: string | null;
+  columns?: string[];
+  rows?: unknown[][];
+  row_count?: number;
+}
+
+export interface ToolCallRecord {
+  name: string;
+  ok: boolean;
+  latency_ms?: number;
+}
+
+/** answer = scores describe the answer (one library, verbatim); per_library = several
+ *  libraries, see libraries_searched; documents_part = the answer also used other tools. */
+export type ScoresScope = 'answer' | 'per_library' | 'documents_part' | null;
+
 export interface AgentCustomOutputs {
+  route?: string[];
+  scores_scope?: ScoresScope;
+  libraries_searched?: LibrarySearched[];
+  genie?: GenieResult | null;
+  tool_calls?: ToolCallRecord[];
+  error?: string | null;
   model?: string;
   corpus?: string | null;
-  qrs?: number;
-  ars?: number;
-  hi_eq?: number;
+  qrs?: number | null;
+  ars?: number | null;
+  hi_eq?: number | null;
   hi_rf?: number | null;
   sources?: AgentSource[];
   trace_id?: string | null;
@@ -50,13 +100,30 @@ export interface ProvidedSource {
   bm25_score: number;
 }
 
-export interface AgentCustomInputs {
+/** A library the Supervisor may search; upload libraries carry their pre-retrieved hits. */
+export interface AgentLibraryInput {
+  id: string;
+  name: string;
+  kind: 'corpus' | 'upload';
+  description: string;
+  documents_language: string;
+  /** the dataset_config row it is scored with */
   dataset: string;
+  corpus?: string;
+  sources?: ProvidedSource[];
+}
+
+export interface AgentCustomInputs {
+  route: 'auto' | 'docs' | 'genie' | 'tools';
   model: string;
   k: number;
   focus: { documents: string[]; section?: string };
-  corpus?: string;
-  sources?: ProvidedSource[];
+  libraries: AgentLibraryInput[];
+}
+
+export interface AgentMessage {
+  role: 'user' | 'assistant';
+  content: string;
 }
 
 // Pull the assistant text out of a ResponsesAgent output array (content may be a
@@ -79,9 +146,10 @@ function extractAnswer(resp: AgentResponse): string {
   return '';
 }
 
-/** Ask the agent AS THE SIGNED-IN USER (OBO) when their token is available. */
+/** Ask the agent AS THE SIGNED-IN USER (OBO) when their token is available. `messages` ends
+ *  with the question; earlier turns let the Supervisor resolve follow-ups. */
 export async function askAgent(
-  question: string,
+  messages: AgentMessage[],
   customInputs: AgentCustomInputs,
   token: string | undefined,
 ): Promise<{ answer: string; outputs: AgentCustomOutputs }> {
@@ -91,7 +159,7 @@ export async function askAgent(
     method: 'POST',
     headers: new Headers({ 'Content-Type': 'application/json' }),
     raw: false,
-    payload: { input: [{ role: 'user', content: question }], custom_inputs: customInputs },
+    payload: { input: messages, custom_inputs: customInputs },
   });
   const resp = raw as AgentResponse;
   return { answer: extractAnswer(resp), outputs: resp.custom_outputs ?? {} };
