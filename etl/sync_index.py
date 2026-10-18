@@ -1,6 +1,6 @@
 """Sync the MyGPT Vector Search index after the ETL, and wait until it's caught up.
 
-Final task of the `mygpt_etl` DABs job (after parse_chunk_index). The index is a
+Final task of the `mygpt_etl` DABs job (after chunk_merge). The index is a
 TRIGGERED Delta Sync index over `doc_chunks`: it only picks up the chunks 02 MERGEd in
 when a sync is requested. This task:
   1. triggers the sync — if one is already running, waits for it and triggers again so
@@ -10,7 +10,7 @@ when a sync is requested. This task:
   3. checks indexed_row_count == count(doc_chunks), which catches silent embedding
      failures (e.g. the `mygpt-bge-m3` endpoint being down).
 
-Index CREATION stays a one-time API step (see the tail of etl/sql/02_parse_chunk_index.sql).
+Index CREATION stays a one-time API step (see the tail of etl/sql/02b_chunk_merge.sql).
 
 Usage:
     python etl/sync_index.py --index structural_biology.mygpt.doc_chunks_corpus_index \

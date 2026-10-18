@@ -7,10 +7,15 @@ source map) so a regression in the port is caught off-cluster. Run:
     python3 agents/rag_agent/test_scoring.py
 """
 
+import math
+
 from scoring import (
     EmbeddingCutoffs,
     ScoringConfig,
+    answer_bm25_scores,
+    answer_keyword_score,
     answer_relevance_score,
+    bm25_tokenize,
     answer_vector_scores,
     hallucination_index_equation,
     min_max_normalization,
@@ -89,6 +94,37 @@ def test_config_overrides_change_qrs():
     strict = ScoringConfig(a_qsem=1.0, b_qkey=0.0, c_qrank=0.0)
     # raw = 69/100*1 = 0.69 ; QRS = (0.69+5.5)/8.53*100 = 72.57 -> 73
     assert _close(question_relevance_score(69.0, 0.5, 0.5, strict), 73.0)
+
+
+# --- Phase 6: answer-side BM25 ------------------------------------------------ #
+def test_bm25_lucene_golden():
+    # 2 docs, no stemming ("unknown"): "kinase" in doc 0 only (df=1, N=2):
+    # idf = ln(1 + 1.5/1.5) = ln 2; dl = avgdl = 2 -> norm = 1.5; tf=1 -> 1/2.5.
+    raw = answer_bm25_scores("kinase", ["kinase binds", "other words"], "unknown")
+    assert _close(raw[0], math.log(2) / 2.5) and raw[1] == 0.0
+
+
+def test_bm25_stemming_per_language():
+    # French Snowball folds "politiques" / "politique"; English doesn't stem French words
+    # to the same root, so only the French stemmer matches.
+    ctx = ["La politique nationale de santé", "Le budget annuel"]
+    assert answer_bm25_scores("les politiques", ctx, "french")[0] > 0
+    assert bm25_tokenize("Políticas sanitarias", "spanish") == bm25_tokenize("política sanitaria", "spanish")
+    assert bm25_tokenize("kinases binding", "english") == ["kinas", "bind"]
+
+
+def test_bm25_devanagari_tokens_stay_whole():
+    # Vowel signs (matras) are Unicode Mn/Mc; they must not split the word.
+    toks = bm25_tokenize("बच्चों में कैंसर", "unknown")
+    assert toks == ["बच्चों", "में", "कैंसर"]
+    assert answer_bm25_scores("कैंसर", ["बच्चों में कैंसर", "स्वास्थ्य नीति"], "hindi")[0] > 0
+
+
+def test_answer_keyword_score_normalizes_on_bm25_window():
+    cfg = ScoringConfig()  # bm25_best=20, bm25_worst=0
+    mean100, per = answer_keyword_score([10.0, 0.0, 5.0], cfg)
+    assert per == [0.5, 0.0, 0.25] and _close(mean100, 25.0)
+    assert answer_keyword_score([], cfg) == (0.0, [])
 
 
 if __name__ == "__main__":

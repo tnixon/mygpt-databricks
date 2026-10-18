@@ -6,7 +6,8 @@ The **Supervisor** agent (Mosaic AI Agent Framework) that routes each query to t
 |---|---|---|---|
 | `embedding/` | `mygpt-bge-m3` | bge-m3 embeddings (GPU, always-on) | `mygpt_deploy_embedding` |
 | `gateway/` | `mygpt-embeddings`, `mygpt-chat` | Unity AI Gateway endpoints (`--task embeddings\|chat`); chat adds usage tracking, an inference table, a per-user rate limit and the optional Azure AI Foundry fallback | `mygpt_deploy_gateway`, `mygpt_deploy_chat_gateway` |
-| `rag_agent/` | `mygpt-rag-agent` | Retrieve → rerank → QRS → generate → NLI → ARS / HI | `mygpt_deploy_agent` |
+| `gateway/` (`--task translate`) | `mygpt-translate` | Phase 6: query/answer translation for non-English corpora (→ `databricks-gemma-3-12b`) | `mygpt_deploy_translate_gateway` |
+| `rag_agent/` | `mygpt-rag-agent` | (translate) → retrieve → rerank (qnli EN / mmarco multilingual) → QRS → generate → NLI (EN) → ARS (stemmed answer BM25) / HI | `mygpt_deploy_agent` |
 | `tools/` | `structural_biology.mygpt_tools.*` | Domain tools as UC functions, served by managed MCP: PubMed (ids, summaries), RCSB PDB (by gene, full text, details), governed corpora | `mygpt_deploy_tools` |
 | `genie/` | Genie space "MyGPT structured data" | Kinome, kinase papers, document catalogue | `mygpt_deploy_genie` |
 | `supervisor/` | `mygpt-supervisor` | Tool-calling router over all of the above; library writes are *proposed*, the app executes them | `mygpt_deploy_supervisor` |

@@ -13,6 +13,10 @@ export interface ChatMessage {
   ars?: number | null;
   hi_eq?: number | null;
   hi_rf?: number | null;
+  /** Phase 6: non-English documents — the question as searched, the answer as scored */
+  documents_language?: string | null;
+  translated_query?: string | null;
+  translated_answer?: string | null;
   /** set once the turn is persisted (Lakebase mode) — enables feedback */
   answer_id?: string | null;
   my_rating?: number | null;
@@ -68,6 +72,10 @@ export function MessageBubble({ msg, streaming }: { msg: ChatMessage; streaming?
           streaming ? <span className="text-muted-foreground">…</span> : null
         )}
 
+        {!isUser && (msg.translated_query || msg.translated_answer) && (
+          <Translations msg={msg} />
+        )}
+
         {!isUser && msg.sources && msg.sources.length > 0 && (
           <div className="mt-3 border-t border-border pt-2">
             <div className="mb-1 text-xs font-medium text-muted-foreground">Sources</div>
@@ -104,6 +112,26 @@ export function MessageBubble({ msg, streaming }: { msg: ChatMessage; streaming?
           <Feedback answerId={msg.answer_id} rating={msg.my_rating ?? null} comment={msg.my_comment ?? ''} />
         )}
       </div>
+    </div>
+  );
+}
+
+/** MyGPT's translated question / answer (functional minimum; full UX in Phase 7). */
+function Translations({ msg }: { msg: ChatMessage }) {
+  const lang = msg.documents_language ? msg.documents_language[0].toUpperCase() + msg.documents_language.slice(1) : '';
+  return (
+    <div className="mt-2 space-y-1 text-xs text-muted-foreground">
+      {msg.translated_query && (
+        <div className="break-words">
+          Searched{lang ? ` in ${lang}` : ''} as: <span className="italic">{msg.translated_query}</span>
+        </div>
+      )}
+      {msg.translated_answer && (
+        <details>
+          <summary className="cursor-pointer">Answer as scored{lang ? ` (${lang})` : ''}</summary>
+          <div className="mt-1 whitespace-pre-wrap break-words">{msg.translated_answer}</div>
+        </details>
+      )}
     </div>
   );
 }

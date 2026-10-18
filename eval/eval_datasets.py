@@ -18,7 +18,11 @@ BlueSky records are built exactly as before (guidelines only).
 
   * SJ Global (health_policies): every policy question is asked of EACH policy
     document — MyGPT's protocol passes ``document_title`` — so a row is
-    (question x document), focused on that document.
+    (question x document), focused on that document. Phase 6 adds:
+      - ``health_policies_hi``, the public Hindi corpus (guidelines only, no SME gold);
+      - a native-language slice on FR / ES: the base questions asked in the documents'
+        language (``eval/native_questions.csv``, made once by translate_questions.py),
+        tagged ``gold = native`` and inheriting the base question's yes/no label.
   * BlueSky (kinase_literature): 3 templated extraction questions x 94
     (paper, kinase) pairs, focused on the paper, with the kinase synonyms appended
     and MyGPT's per-question answer-format prompt passed as ``instructions``.
@@ -60,6 +64,7 @@ def specs(catalog: str = "structural_biology", schema: str = "mygpt") -> dict[st
     return {
         "health_policies_fr": EvalDatasetSpec(f"{catalog}.{schema}.eval_health_policies_fr", "health_policies_fr", "sj_global"),
         "health_policies_es": EvalDatasetSpec(f"{catalog}.{schema}.eval_health_policies_es", "health_policies_es", "sj_global"),
+        "health_policies_hi": EvalDatasetSpec(f"{catalog}.{schema}.eval_health_policies_hi", "health_policies_hi", "sj_global"),
         "kinase_literature": EvalDatasetSpec(f"{catalog}.{schema}.eval_kinase_literature", "kinase_literature", "bluesky"),
         "bioasq": EvalDatasetSpec(f"{catalog}.{schema}.eval_bioasq", "biomed", "bioasq"),
     }
@@ -86,8 +91,11 @@ def _read_csv(path: str) -> list[dict]:
     raise ValueError(f"Could not decode {path}")
 
 
-def _request(question: str, corpus: str, document: str | None, instructions: str = "", k: int = K) -> dict:
+def _request(question: str, corpus: str, document: str | None, instructions: str = "", k: int = K,
+             query_language: str | None = None) -> dict:
     custom_inputs: dict = {"corpus": corpus, "k": k}
+    if query_language:
+        custom_inputs["query_language"] = query_language
     if document:
         custom_inputs["focus"] = {"documents": [document]}
     if instructions:
@@ -98,8 +106,25 @@ def _request(question: str, corpus: str, document: str | None, instructions: str
 # --------------------------------------------------------------------------- #
 # SJ Global — health_policies
 # --------------------------------------------------------------------------- #
-_LANG = {"health_policies_fr": ("French", "French_10_pdfs"), "health_policies_es": ("Spanish", "Spanish_10_pdfs")}
+# corpus -> (language, submodule PDF folder used when the docs volume isn't mounted).
+# The Hindi corpus is public PDFs St. Jude didn't evaluate: volume only, no SME gold.
+_LANG = {
+    "health_policies_fr": ("French", "French_10_pdfs"),
+    "health_policies_es": ("Spanish", "Spanish_10_pdfs"),
+    "health_policies_hi": ("Hindi", None),
+}
 POLICY_GOLD = "Ground truths Global policies.csv"
+# Phase 6: the base questions translated once into the documents' language (qid, language,
+# question); written by eval/translate_questions.py and committed, so builds are deterministic.
+NATIVE_QUESTIONS = os.path.join("eval", "native_questions.csv")
+
+
+def native_questions(base_dir: str) -> dict[tuple[str, str], str]:
+    """(qid, language) -> the question in that language; empty until the file exists."""
+    path = os.path.join(base_dir, NATIVE_QUESTIONS)
+    if not os.path.exists(path):
+        return {}
+    return {(r["qid"], r["language"].lower()): r["question"] for r in _read_csv(path) if r.get("question")}
 
 
 def yes_no_label(text: str) -> str:
@@ -142,9 +167,12 @@ def health_policy_records(base_dir: str, corpus: str, source_sha: str = "") -> l
     questions = _read_csv(os.path.join(root, "global_questions.csv"))
     # PDFs aren't bundle-synced (databricks.yml sync.exclude); list the indexed volume folder.
     volume_dir = os.path.join(DOCS_VOLUME, corpus)
-    doc_dir = volume_dir if os.path.isdir(volume_dir) else os.path.join(root, pdf_dir)
+    doc_dir = volume_dir if os.path.isdir(volume_dir) else (os.path.join(root, pdf_dir) if pdf_dir else None)
+    if doc_dir is None or not os.path.isdir(doc_dir):
+        return []
     documents = sorted(f for f in os.listdir(doc_dir) if f.lower().endswith(".pdf"))
     gold = policy_gold(base_dir)
+    native = native_questions(base_dir)
     records = []
     for doc in documents:
         for q in questions:
@@ -180,6 +208,24 @@ def health_policy_records(base_dir: str, corpus: str, source_sha: str = "") -> l
                     "mygpt_label": g["mygpt_label"] if g else "",
                 },
             })
+            # Phase 6: the base question asked in the documents' language. It inherits only
+            # the yes/no label (the reference summary is English, for the hinted wording).
+            native_q = native.get((q["qid"], language.lower())) if variant == "no" else None
+            if native_q:
+                native_exp: dict = {"guidelines": [
+                    "The response begins with 'Yes' or 'No' (or the same word in the language of the question).",
+                    expectations["guidelines"][1],
+                    f"The response is written in {language}, the language of the question.",
+                ]}
+                if g:
+                    native_exp["expected_label"] = g["expected_label"]
+                    native_exp["gold_scope"] = "label_only"
+                records.append({
+                    "inputs": _request(native_q, corpus, doc, query_language=language.lower()),
+                    "expectations": native_exp,
+                    "tags": {**records[-1]["tags"], "query_language": language.lower(),
+                             "gold": "native" if g else "none"},
+                })
     return records
 
 

@@ -35,30 +35,48 @@ class DatasetConfig:
     scoring: ScoringConfig
     cutoffs: EmbeddingCutoffs
     reranker_cutoff: float
+    translate_query: bool = False
+    translate_answer: bool = False
+    answer_bm25: bool = False
 
 
-# Per-corpus deviations from the packaged defaults (mirror of etl/config/dataset_config.csv)
-# so the endpoint applies them even without a warehouse: the FR/ES policy corpora skip
-# the English-only QNLI reranker (and NLI, via documents_language).
-_PACKAGED_OVERRIDES = {
-    "health_policies_fr": {"use_reranker": False, "documents_language": "french"},
-    "health_policies_es": {"use_reranker": False, "documents_language": "spanish"},
+RERANK_MODEL = "cross-encoder/qnli-electra-base"
+RERANK_MODEL_MULTILINGUAL = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
+RERANK_CUTOFFS = {RERANK_MODEL: 0.10, RERANK_MODEL_MULTILINGUAL: 0.05}
+TRANSLATABLE = {"english", "french", "spanish", "portuguese", "german", "italian", "dutch", "arabic", "hindi", "hungarian"}
+
+# Governed corpora whose documents aren't English (mirror of etl/config/dataset_config.csv).
+# Upload-library config rows are named default_<language>. Packaged defaults derive from
+# the language, so the endpoint applies them even without a warehouse: non-English uses
+# MyGPT's multilingual mmarco reranker and query/answer translation (NLI is English-only).
+CORPUS_LANGUAGE = {
+    "health_policies_fr": "french", "health_policies_es": "spanish", "health_policies_hi": "hindi",
 }
 
 
+def dataset_language(dataset_name: str) -> str:
+    if dataset_name.startswith("default_"):
+        return dataset_name[len("default_"):]
+    return CORPUS_LANGUAGE.get(dataset_name, "english")
+
+
 def _fallback(dataset_name: str) -> DatasetConfig:
-    ov = _PACKAGED_OVERRIDES.get(dataset_name, {})
+    language = dataset_language(dataset_name)
+    reranker = RERANK_MODEL if language == "english" else RERANK_MODEL_MULTILINGUAL
     return DatasetConfig(
         dataset_name=dataset_name,
         embedding_model="bge-m3",
-        reranker="cross-encoder/qnli-electra-base",
+        reranker=reranker,
         use_bm25=True,
-        use_reranker=ov.get("use_reranker", True),
-        documents_language=ov.get("documents_language", "english"),
+        use_reranker=True,
+        documents_language=language,
         hi_by_equation=True,
         scoring=ScoringConfig(),
         cutoffs=_DEFAULT_CUTOFFS,
-        reranker_cutoff=0.10,
+        reranker_cutoff=RERANK_CUTOFFS[reranker],
+        translate_query=language in TRANSLATABLE and language != "english",
+        translate_answer=False,
+        answer_bm25=False,
     )
 
 
@@ -122,7 +140,10 @@ def load_dataset_config(dataset_name: str = "mygpt") -> DatasetConfig:
                 best_ac=float(cut["best_distance_ac"]) if cut else _DEFAULT_CUTOFFS.best_ac,
                 worst_ac=float(cut["worst_distance_ac"]) if cut else _DEFAULT_CUTOFFS.worst_ac,
             ),
-            reranker_cutoff=float(rk_rows[0]["cutoff_score"]) if rk_rows else 0.10,
+            reranker_cutoff=float(rk_rows[0]["cutoff_score"]) if rk_rows else RERANK_CUTOFFS.get(str(d["reranker"]), 0.10),
+            translate_query=_as_bool(d.get("translate_query", False)),
+            translate_answer=_as_bool(d.get("translate_answer", False)),
+            answer_bm25=_as_bool(d.get("answer_bm25", False)),
         )
     except Exception as exc:  # noqa: BLE001 - never let config fail the endpoint
         print(f"[config] falling back to defaults: {type(exc).__name__}: {exc}")

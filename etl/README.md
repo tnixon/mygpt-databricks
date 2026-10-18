@@ -7,13 +7,17 @@ feed **Genie**.
 
 ## Today: the `mygpt_etl` job (incremental)
 Source PDFs live in `/Volumes/structural_biology/mygpt/docs/<corpus>/`. One top-level folder is
-one **corpus** (`biomed`, `health_policies_fr`, `health_policies_es`, `kinase_literature`), which
-the agent filters on via `custom_inputs.corpus`.
+one **corpus** (`biomed`, `health_policies_fr`, `health_policies_es`, `health_policies_hi`,
+`kinase_literature`), which the agent filters on via `custom_inputs.corpus`.
+`health_policies_hi` (Phase 6) holds public Hindi health-policy PDFs that exercise the
+parse fallback and the Hindi config. Upload them with `make corpus-hi HI_PDFS=<dir> PROFILE=mygpt`.
 
 | Task | What |
 |---|---|
 | `landing` (`sql/01_landing_documents.sql`) | `documents`: one pointer row per file. `id = xxhash64(path)`, so ids are stable across runs |
-| `parse_chunk_index` (`sql/02_parse_chunk_index.sql`) | Parses only **new or changed** files with `ai_parse_document`, then **MERGEs** section chunks into `doc_chunks` |
+| `parse_chunk_index` (`sql/02_parse_chunk_index.sql`) | Parses only **new or changed** files with `ai_parse_document` into section-tagged staging elements |
+| `parse_fallback` (`parse_fallback.py`, Phase 6) | Flags documents whose text is empty, has 3+ `(cid:N)` markers, has more than 2% U+FFFD/NUL characters, or (Hindi) has no Devanagari. Re-extracts them with PyMuPDF and keeps that text when it's better. Records the check and parser in `doc_parse_quality`. Does nothing when no document is flagged |
+| `chunk_merge` (`sql/02b_chunk_merge.sql`) | **MERGEs** ~1000-char section chunks into `doc_chunks` (steps 4–9 of the old `02`, unchanged) |
 | `sync_index` (`sync_index.py`) | Syncs the TRIGGERED Delta Sync index `doc_chunks_corpus_index`, waits for it to finish, and checks the indexed row count |
 | `sections_and_config` (`sql/03_sections_and_config.sql`) | Per-corpus scoring config tables |
 
@@ -25,14 +29,20 @@ the agent filters on via `custom_inputs.corpus`.
 - Removing a file, or dropping a corpus from the allow-list in `02`, deletes its elements,
   chunks, and log row on the next run.
 - To add a corpus: create the volume folder, add it to the allow-list in `02`, and add a
-  `dataset_config` row in `03` (plus `etl/config/dataset_config.csv`).
+  `dataset_config` row in `03` (plus `etl/config/dataset_config.csv`). For a non-English corpus
+  you also need to:
+  - add it to `CORPUS_LANGUAGE` in `agents/rag_agent/agent.py` (and `config.py`,
+    `parse_fallback.py`);
+  - add a corpus library in the app migrations.
+- Parse quality: `SELECT corpus, parser, reason, count(*) FROM doc_parse_quality GROUP BY ALL`.
+  To force a document through the fallback again, delete its `doc_parse_log` row.
 
 ```bash
 databricks bundle deploy -p mygpt --var warehouse_id=<id>
 databricks bundle run mygpt_etl -p mygpt --var warehouse_id=<id>
 ```
 
-Index **creation** is a one-time API step; see the tail of `sql/02_parse_chunk_index.sql`.
+Index **creation** is a one-time API step; see the tail of `sql/02b_chunk_merge.sql`.
 
 **Gotchas (both hit on 2026-10-12)**
 - **Never `CREATE OR REPLACE` `doc_chunks`.** A replace gives the Delta table a new id, which

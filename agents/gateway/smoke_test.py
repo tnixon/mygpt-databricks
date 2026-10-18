@@ -2,6 +2,10 @@
 
     python agents/gateway/smoke_test.py --profile mygpt                 # mygpt-embeddings
     python agents/gateway/smoke_test.py --profile mygpt --task chat     # mygpt-chat (Phase 5)
+    python agents/gateway/smoke_test.py --profile mygpt --task translate  # mygpt-translate (Phase 6)
+
+Translate: an English question must come back in French/Spanish, and French input
+must come back (near-)unchanged — the agent relies on that no-op rule.
 
 Chat: the Supervisor relies on native tool calling through the gateway, so the check is a
 two-turn contract — the model must answer a tool-shaped question with a `tool_calls`
@@ -73,10 +77,37 @@ def check_chat_tool_calling(w, endpoint: str) -> None:
     print(f"[chat] answer after tool result: {str(content)[:80]!r}")
 
 
+def check_translation(w, endpoint: str) -> None:
+    import re
+    import time
+
+    def translate(text: str, tgt_full: str, tgt_code: str) -> str:
+        system = (f"You are a professional English (en) to {tgt_full} ({tgt_code}) translator. Produce only the "
+                  f"{tgt_full} translation, without any additional explanations or commentary. If the text is "
+                  f"already in {tgt_full}, return it unchanged. Please translate the following English text "
+                  f"into {tgt_full}: ")
+        t0 = time.time()
+        resp = w.api_client.do("POST", f"/serving-endpoints/{endpoint}/invocations", body={
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": text}],
+            "temperature": 0})
+        out = str(resp["choices"][0]["message"]["content"]).strip()
+        print(f"[translate] {tgt_code} ({time.time() - t0:.1f}s): {out[:90]!r}")
+        return out
+
+    q = "Does the national cancer plan mention children?"
+    fr = translate(q, "French", "fr")
+    assert re.search(r"\b(enfants?|cancer)\b", fr, re.I) and fr != q, f"[translate] not French: {fr!r}"
+    es = translate(q, "Spanish", "es")
+    assert re.search(r"\b(niños?|infancia|cáncer)\b", es, re.I), f"[translate] not Spanish: {es!r}"
+    src = "Le plan national mentionne-t-il les enfants ?"
+    same = translate(src, "French", "fr")
+    assert "enfants" in same, f"[translate] French input not kept: {same!r}"
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--profile", default="mygpt")
-    ap.add_argument("--task", choices=["embeddings", "chat"], default="embeddings")
+    ap.add_argument("--task", choices=["embeddings", "chat", "translate"], default="embeddings")
     ap.add_argument("--endpoint", default="")
     args = ap.parse_args()
 
@@ -85,6 +116,8 @@ def main() -> None:
     w = WorkspaceClient(profile=args.profile)
     if args.task == "chat":
         check_chat_tool_calling(w, args.endpoint or "mygpt-chat")
+    elif args.task == "translate":
+        check_translation(w, args.endpoint or "mygpt-translate")
     else:
         check_raw_vectors(w, args.endpoint or "mygpt-embeddings")
         check_openai_client_path(w, args.endpoint or "mygpt-embeddings")

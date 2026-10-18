@@ -9,6 +9,7 @@ St. Jude's private SME ground truths (SJ Global, BlueSky) and the public BioASQ 
 |---|---|---|---|---|
 | SJ Global | `health_policies/` (FR) | `structural_biology.mygpt.eval_health_policies_fr` | 21 questions × 10 policies = 210 | 160 SME + 50 inherited (yes/no) |
 | SJ Global | `health_policies/` (ES) | `structural_biology.mygpt.eval_health_policies_es` | 210 | 160 SME + 50 inherited |
+| SJ Global | public Hindi PDFs (Phase 6) | `structural_biology.mygpt.eval_health_policies_hi` | 21 questions × the `health_policies_hi` docs | none (guidelines only) |
 | BlueSky | `kinase_literature/` | `structural_biology.mygpt.eval_kinase_literature` | 3 questions × 94 paper/kinase pairs = 282 | SME ground truth on most rows |
 | BioASQ | `BioASQ/` (public) | `structural_biology.mygpt.eval_bioasq` | 163 (76 yes/no + 87 factoid) | benchmark `exact_answer` / `ideal_answer` |
 
@@ -76,6 +77,7 @@ gold, mark the row instead (as `gold_scope: label_only` does), or rebuild the da
 | `reference_baseline.py` | Job: MyGPT's own recorded answers through our gold scorers → parity baseline + judge agreement |
 | `gates.yaml` | Minimum `<metric>/mean` per use case (judge/gold thresholds set after baseline) |
 | `monitor.py` | Job: register the shared scorers on live app traffic |
+| `translate_questions.py` | One-off, run locally: translates the SJ Global base questions via `mygpt-translate` into `native_questions.csv` (review it and commit it) |
 | `test_scorers.py` | `make eval-test` |
 
 ## Scorers
@@ -148,6 +150,24 @@ for the model comparison:
 databricks jobs run-now -p mygpt --json '{"job_id": <mygpt_eval job id>, "job_parameters":
   {"matrix": "[{\"dataset\":\"health_policies_fr\",\"model\":\"gptoss\"}]"}}'
 ```
+
+## Multilingual (Phase 6)
+- **Translation A/B.** The `mygpt_eval` job's `translate` parameter can be `auto` (the dataset
+  config decides, so FR/ES translate), `true` or `false`. It's sent as
+  `custom_inputs.translate` on every row, and runs are tagged `mygpt.eval.translate`:
+  ```bash
+  databricks jobs run-now -p mygpt --json '{"job_id": <mygpt_eval job id>, "job_parameters": {"translate": "false",
+    "matrix": "[{\"dataset\":\"health_policies_fr\",\"model\":\"sonnet\"},{\"dataset\":\"health_policies_es\",\"model\":\"sonnet\"}]"}}'
+  ```
+  Run it again with `"translate": "true"`. The metrics to compare are `yes_no_correct`,
+  `yes_no_correct/inherited/mean` (keyword-free variants), `gold_correctness` and
+  `retrieval_groundedness`.
+- **Native-language slice.** Once `native_questions.csv` exists, FR/ES gain the base questions
+  asked in French or Spanish. They're tagged `gold = native` (giving
+  `yes_no_correct/native/mean`) and inherit the yes/no label only.
+- **Re-baseline.** Re-baseline FR/ES after deploying Phase 6 (the reranker and translation
+  change their scores). English corpora only change if `answer_bm25` is turned on (off by
+  default). Reset `gates.yaml` from the new runs.
 
 ## Blocked on St. Jude (BlueSky)
 - `kinase_literature/inputs/expression_systems_list.csv`, the Q11 vocabulary that

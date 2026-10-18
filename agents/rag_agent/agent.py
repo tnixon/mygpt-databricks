@@ -7,11 +7,20 @@ trust metrics and per-source scores via ``custom_outputs``:
   1. retrieve   AI Search (ANN + hybrid) with document/section focus filters — or, for
                 Phase-4 upload libraries, the chunks the app already retrieved from
                 Lakebase under RLS (``custom_inputs.sources``; see sources_from_inputs)
-  2. rerank     cross-encoder/qnli-electra-base (query <-> source relevance)
+  2. rerank     cross-encoder/qnli-electra-base for English, mmarco-mMiniLMv2 for other
+                languages (query <-> source relevance)
   3. QRS        semantic (per-model distance calibration) + BM25 + rerank
   4. generate   FMAPI chat (Claude / Llama / GPT-OSS)
-  5. NLI        cross-encoder/nli-deberta-v3-base (answer <-> source entailment)
-  6. ARS + HI   answer relevance + hallucination index (equation; RF toggle)
+  5. NLI        cross-encoder/nli-deberta-v3-base (answer <-> source entailment; English only)
+  6. ARS + HI   answer relevance (stemmed answer-vs-context BM25) + hallucination index
+                (equation; RF toggle)
+
+Phase 6 (multilingual): when the dataset's documents aren't in the question's language,
+the question is translated into the document language (``mygpt-translate``) for retrieval
+and rerank. The user-facing answer stays in the question's language. MyGPT also translates
+the answer for ARS scoring (``translate_answer``); that is off by default because it
+regenerates the whole answer (~18 s on gemma-3-12b in the 2026-10-17 live check), and bge-m3
+scores the cross-lingual answer directly.
 
 The scoring math, config loader, and random-forest HI are INLINED here (rather than
 imported from scoring.py / config.py / hi_random_forest.py) because MLflow imports
@@ -19,15 +28,20 @@ this file in isolation when validating a code-based model, so sibling imports ar
 not resolvable at log time. ``scoring.py`` + ``test_scoring.py`` remain the verified
 reference these inlined functions mirror — keep them in sync.
 
-Fidelity = Balanced (see PLAN.md): the BM25 term is derived from AI Search hybrid
-scores rescored per source rather than a separate full-corpus bm25s index.
+Fidelity = Balanced (see PLAN.md): the question-side BM25 term is derived from AI Search
+hybrid scores rescored per source rather than a separate full-corpus bm25s index. The
+answer-side term can be a real stemmed BM25 of the answer over the retrieved contexts, as in
+MyGPT (``answer_bm25``); off by default until bm25_best/worst are calibrated for it — with
+the bootstrap window ARS saturated at 100 on English answers (2026-10-17).
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import pickle
+import re
 import uuid
 from dataclasses import dataclass
 from typing import Any, Sequence
@@ -47,8 +61,27 @@ MODEL_ALIASES = {
     "llama": os.environ.get("MYGPT_LLM_LLAMA", "databricks-llama-4-maverick"),
     "gptoss": os.environ.get("MYGPT_LLM_GPTOSS", "databricks-gpt-oss-120b"),
 }
-RERANK_MODEL = "cross-encoder/qnli-electra-base"
+# Phase 6: query/answer translation goes through its own Unity AI Gateway endpoint
+# (mygpt-translate -> databricks-gemma-3-12b, the base model of MyGPT's translategemma).
+TRANSLATE_ENDPOINT = os.environ.get("MYGPT_TRANSLATE_ENDPOINT", "mygpt-translate")
+RERANK_MODEL = "cross-encoder/qnli-electra-base"  # English (MyGPT default)
+RERANK_MODEL_MULTILINGUAL = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"  # MyGPT's non-English default
+RERANK_CUTOFFS = {RERANK_MODEL: 0.10, RERANK_MODEL_MULTILINGUAL: 0.05}
 NLI_MODEL = "cross-encoder/nli-deberta-v3-base"
+
+# MyGPT's documents_language choices -> (full name, ISO code) for the translator prompt.
+# "unknown" has no entry: such libraries get the multilingual reranker but no translation.
+LANGUAGES = {
+    "english": ("English", "en"), "french": ("French", "fr"), "spanish": ("Spanish", "es"),
+    "portuguese": ("Portuguese", "pt"), "german": ("German", "de"), "italian": ("Italian", "it"),
+    "dutch": ("Dutch", "nl"), "arabic": ("Arabic", "ar"), "hindi": ("Hindi", "hi"),
+    "hungarian": ("Hungarian", "hu"),
+}
+# Governed corpora whose documents aren't English (mirror of dataset_config). Used for the
+# packaged config and to pick a per-source reranker in the mixed "all corpora" scope.
+CORPUS_LANGUAGE = {
+    "health_policies_fr": "french", "health_policies_es": "spanish", "health_policies_hi": "hindi",
+}
 
 
 # =========================================================================== #
@@ -144,6 +177,65 @@ def _clamp_0_100(value: float) -> float:
     return 0.0 if value < 0 else 100.0 if value > 100 else float(value)
 
 
+# Words of 2+ characters, as in bm25s' default token pattern, but Devanagari vowel signs
+# and viramas (Unicode Mn/Mc, which \w doesn't match) stay inside the word.
+_TOKEN_RE = re.compile(r"[\wऀ-ॿ]{2,}")
+_STEMMERS: dict[str, Any] = {}
+
+
+def _stemmer(language: str):
+    """PyStemmer (Snowball) stemmer for a MyGPT language name; None if unsupported."""
+    if language not in _STEMMERS:
+        try:
+            import Stemmer
+
+            _STEMMERS[language] = Stemmer.Stemmer(language)
+        except Exception:  # noqa: BLE001  ("unknown", or no PyStemmer)
+            _STEMMERS[language] = None
+    return _STEMMERS[language]
+
+
+def bm25_tokenize(text: str, language: str) -> list[str]:
+    tokens = _TOKEN_RE.findall(str(text).lower())
+    stemmer = _stemmer(language)
+    return stemmer.stemWords(tokens) if stemmer else tokens
+
+
+def answer_bm25_scores(answer: str, contexts: Sequence[str], language: str, k1: float = 1.5, b: float = 0.75) -> list[float]:
+    """Raw BM25 of the answer against each context (same order), with the contexts as the
+    corpus — MyGPT's get_answer_distance_by_context_bm25 (bm25s, method "lucene",
+    PyStemmer for the documents' language), computed in memory."""
+    docs = [bm25_tokenize(c, language) for c in contexts]
+    n = len(docs)
+    if n == 0:
+        return []
+    avgdl = (sum(len(d) for d in docs) / n) or 1.0
+    df: dict[str, int] = {}
+    for d in docs:
+        for t in set(d):
+            df[t] = df.get(t, 0) + 1
+    query = set(bm25_tokenize(answer, language))
+    scores = []
+    for d in docs:
+        tf: dict[str, int] = {}
+        for t in d:
+            if t in query:
+                tf[t] = tf.get(t, 0) + 1
+        norm = k1 * (1 - b + b * len(d) / avgdl)
+        scores.append(sum(
+            math.log(1 + (n - df[t] + 0.5) / (df[t] + 0.5)) * f / (f + norm) for t, f in tf.items()
+        ))
+    return scores
+
+
+def answer_keyword_score(raw_scores: Sequence[float], cfg: ScoringConfig) -> tuple[float, list[float]]:
+    """Per-source [0, 1] BM25 scores (min-max on bm25_best/worst) and their mean x100."""
+    if not raw_scores:
+        return 0.0, []
+    scores = [round(v, 3) for v in min_max_normalization([round(r, 3) for r in raw_scores], cfg.bm25_best, cfg.bm25_worst)]
+    return round(sum(scores) / len(scores) * 100, 2), scores
+
+
 # =========================================================================== #
 # RANDOM-FOREST HI  (mirror of hi_random_forest.py — best-effort toggle)
 # =========================================================================== #
@@ -220,24 +312,34 @@ class DatasetConfig:
     scoring: ScoringConfig
     cutoffs: EmbeddingCutoffs
     reranker_cutoff: float
+    translate_query: bool = False
+    translate_answer: bool = False
+    answer_bm25: bool = False
 
 
-# Per-corpus deviations from the packaged defaults (mirror of config.py / the
-# dataset_config CSV) so they apply even without MYGPT_WAREHOUSE_ID.
-_PACKAGED_OVERRIDES = {
-    "health_policies_fr": {"use_reranker": False, "documents_language": "french"},
-    "health_policies_es": {"use_reranker": False, "documents_language": "spanish"},
-}
+def dataset_language(dataset_name: str) -> str:
+    """Documents language of a packaged dataset: a governed corpus (CORPUS_LANGUAGE) or an
+    upload-library config row ``default_<language>``; everything else is English."""
+    if dataset_name.startswith("default_"):
+        return dataset_name[len("default_"):]
+    return CORPUS_LANGUAGE.get(dataset_name, "english")
+
+
+def reranker_for(language: str) -> str:
+    return RERANK_MODEL if language == "english" else RERANK_MODEL_MULTILINGUAL
 
 
 def _config_fallback(dataset_name: str) -> DatasetConfig:
-    ov = _PACKAGED_OVERRIDES.get(dataset_name, {})
+    """Packaged defaults (mirror of config.py / the dataset_config CSV), derived from the
+    dataset's language so they apply even without MYGPT_WAREHOUSE_ID."""
+    language = dataset_language(dataset_name)
+    reranker = reranker_for(language)
     return DatasetConfig(
-        dataset_name=dataset_name, embedding_model="bge-m3",
-        reranker="cross-encoder/qnli-electra-base", use_bm25=True,
-        use_reranker=ov.get("use_reranker", True),
-        documents_language=ov.get("documents_language", "english"), hi_by_equation=True,
-        scoring=ScoringConfig(), cutoffs=_DEFAULT_CUTOFFS, reranker_cutoff=0.10,
+        dataset_name=dataset_name, embedding_model="bge-m3", reranker=reranker, use_bm25=True,
+        use_reranker=True, documents_language=language, hi_by_equation=True,
+        scoring=ScoringConfig(), cutoffs=_DEFAULT_CUTOFFS, reranker_cutoff=RERANK_CUTOFFS[reranker],
+        translate_query=language in LANGUAGES and language != "english", translate_answer=False,
+        answer_bm25=False,
     )
 
 
@@ -281,7 +383,10 @@ def load_dataset_config(dataset_name: str, workspace) -> DatasetConfig:
                 best_ac=float(c["best_distance_ac"]) if c else _DEFAULT_CUTOFFS.best_ac,
                 worst_ac=float(c["worst_distance_ac"]) if c else _DEFAULT_CUTOFFS.worst_ac,
             ),
-            reranker_cutoff=float(rk[0]["cutoff_score"]) if rk else 0.10,
+            reranker_cutoff=float(rk[0]["cutoff_score"]) if rk else RERANK_CUTOFFS.get(str(d["reranker"]), 0.10),
+            translate_query=_as_bool(d.get("translate_query", False)),
+            translate_answer=_as_bool(d.get("translate_answer", False)),
+            answer_bm25=_as_bool(d.get("answer_bm25", False)),
         )
     except Exception as exc:  # noqa: BLE001
         print(f"[config] fallback to defaults: {type(exc).__name__}: {exc}")
@@ -294,7 +399,7 @@ def load_dataset_config(dataset_name: str, workspace) -> DatasetConfig:
 class MyGPTRagAgent(ResponsesAgent):
     def __init__(self) -> None:
         self._cfg_cache: dict[str, DatasetConfig] = {}
-        self._reranker = None
+        self._rerankers: dict[str, Any] = {}
         self._nli = None
         self._ws = None
 
@@ -305,13 +410,13 @@ class MyGPTRagAgent(ResponsesAgent):
             self._ws = WorkspaceClient()
         return self._ws
 
-    def _reranker_model(self):
-        if self._reranker is None:
+    def _reranker_model(self, name: str = RERANK_MODEL):
+        if name not in self._rerankers:
             import torch
             from sentence_transformers import CrossEncoder
 
-            self._reranker = CrossEncoder(RERANK_MODEL, activation_fn=torch.nn.Sigmoid())
-        return self._reranker
+            self._rerankers[name] = CrossEncoder(name, activation_fn=torch.nn.Sigmoid())
+        return self._rerankers[name]
 
     def _nli_model(self):
         if self._nli is None:
@@ -400,18 +505,59 @@ class MyGPTRagAgent(ResponsesAgent):
             })
         return sources
 
+    def _translate(self, text: str, source_language: str, target_language: str) -> tuple[str, str | None]:
+        """Translate with MyGPT's translategemma system prompt. Returns (text, error); any
+        failure falls back to the original text so translation never fails a request."""
+        with mlflow.start_span(name="translate", span_type="LLM") as span:
+            span.set_inputs({"text": text, "source": source_language, "target": target_language})
+            src_full, src_code = LANGUAGES.get(source_language, (source_language.title(), source_language[:2]))
+            tgt_full, tgt_code = LANGUAGES[target_language]
+            system = (
+                f"You are a professional {src_full} ({src_code}) to {tgt_full} ({tgt_code}) translator. "
+                f"Your goal is to accurately convey the meaning and nuances of the original {src_full} text "
+                f"while adhering to {tgt_full} grammar, vocabulary, and cultural sensitivities. Produce only "
+                f"the {tgt_full} translation, without any additional explanations or commentary. If the text "
+                f"is already in {tgt_full}, return it unchanged. Please translate the following {src_full} "
+                f"text into {tgt_full}: "
+            )
+            try:
+                resp = self._workspace().api_client.do(
+                    "POST", f"/serving-endpoints/{TRANSLATE_ENDPOINT}/invocations",
+                    body={"messages": [{"role": "system", "content": system}, {"role": "user", "content": text}],
+                          "temperature": 0},
+                )
+                out = _message_text(resp)
+                if not out:
+                    raise ValueError("empty translation")
+            except Exception as exc:  # noqa: BLE001
+                error = f"{type(exc).__name__}: {exc}"
+                print(f"[translate] falling back to the original text: {error}")
+                span.set_outputs({"text": text, "error": error})
+                return text, error
+            span.set_outputs({"text": out})
+            return out, None
+
     @mlflow.trace(span_type="RERANKER")
-    def _rerank(self, query: str, sources: list[dict], cfg: DatasetConfig) -> list[dict]:
+    def _rerank(self, query: str, sources: list[dict], cfg: DatasetConfig, per_source_language: bool = False) -> list[dict]:
+        """Rerank with the dataset's reranker. In the mixed "all corpora" scope
+        (``per_source_language``) each source uses the reranker for its corpus' language."""
         if not sources or not cfg.use_reranker:
             for s in sources:
                 s["rerank_score"] = 0.0
             return sources
-        scores = self._reranker_model().predict([[query, s["context"]] for s in sources])
+        groups: dict[str, list[dict]] = {}
+        for s in sources:
+            name = reranker_for(CORPUS_LANGUAGE.get(s["corpus"], "english")) if per_source_language else cfg.reranker
+            groups.setdefault(name, []).append(s)
         kept = []
-        for s, sc in zip(sources, scores):
-            s["rerank_score"] = round(float(sc), 3)
-            if s["rerank_score"] > cfg.reranker_cutoff:
-                kept.append(s)
+        for name, group in groups.items():
+            cutoff = cfg.reranker_cutoff if name == cfg.reranker else RERANK_CUTOFFS.get(name, 0.10)
+            scores = self._reranker_model(name).predict([[query, s["context"]] for s in group])
+            for s, sc in zip(group, scores):
+                s["rerank_score"] = round(float(sc), 3)
+                s["reranker"] = name
+                if s["rerank_score"] > cutoff:
+                    kept.append(s)
         kept.sort(key=lambda s: s["rerank_score"], reverse=True)
         for i, s in enumerate(kept, start=1):
             s["rank"] = i
@@ -437,7 +583,8 @@ class MyGPTRagAgent(ResponsesAgent):
         prompt = (
             "You are MyGPT, a governed research assistant for St. Jude. Answer the question "
             "using ONLY the numbered sources below, and cite them inline as [n]. If the sources "
-            "do not contain the answer, say you couldn't find it in the documents.\n\n"
+            "do not contain the answer, say you couldn't find it in the documents. Answer in the "
+            "language of the question, even when the sources are in another language.\n\n"
             f"Sources:\n{context}\n\nQuestion: {query}"
         )
         if instructions:
@@ -451,20 +598,7 @@ class MyGPTRagAgent(ResponsesAgent):
             "POST", f"/serving-endpoints/{endpoint}/invocations",
             body={"messages": [{"role": "user", "content": prompt}]},
         )
-        choices = resp.get("choices") or []
-        if not choices:
-            return ""
-        content = (choices[0].get("message") or {}).get("content") or ""
-        if isinstance(content, list):
-            # Reasoning-capable models (e.g. Claude Sonnet 5) can return content blocks —
-            # [{"type": "reasoning", "summary": [...]}, {"type": "text", "text": ...}].
-            # Keep only the answer text; passing the blocks on broke _embed (bge-m3
-            # rejects dict inputs) and leaked reasoning into the answer.
-            content = "".join(
-                part.get("text", "") for part in content
-                if isinstance(part, dict) and part.get("type") in ("text", "output_text")
-            )
-        return str(content).strip()
+        return _message_text(resp)
 
     @mlflow.trace(span_type="PARSER")
     def _score_answer(self, answer: str, sources: list[dict], question_semantic: float, cfg: DatasetConfig) -> dict:
@@ -482,12 +616,19 @@ class MyGPTRagAgent(ResponsesAgent):
             nli_labels = [label_map[int(p.argmax())] for p in preds]
 
         rerank_mean_100 = (sum(s["rerank_score"] for s in sources) / len(sources)) * 100
-        answer_keyword_100 = (sum(s["bm25_score"] for s in sources) / len(sources)) * 100 if cfg.use_bm25 else 0.0
+        if cfg.use_bm25 and cfg.answer_bm25:
+            # Phase 6: stemmed BM25 of the answer over the retrieved contexts (MyGPT).
+            raw = answer_bm25_scores(answer, [s["context"] for s in sources], cfg.documents_language)
+            answer_keyword_100, answer_bm25 = answer_keyword_score(raw, cfg.scoring)
+            for s, v in zip(sources, answer_bm25):
+                s["answer_bm25_score"] = v
+        else:
+            # Pre-Phase-6 behaviour: reuse the question-side hybrid scores.
+            answer_bm25 = [s["bm25_score"] for s in sources]
+            answer_keyword_100 = (sum(answer_bm25) / len(answer_bm25)) * 100 if cfg.use_bm25 else 0.0
         ars = answer_relevance_score(answer_semantic, answer_keyword_100, rerank_mean_100, cfg.scoring)
         hi_eq = hallucination_index_equation(question_semantic, ars, cfg.scoring)
-        hi_rf = predict_rf_hallucination_index(
-            answer_vec_scores, [s["bm25_score"] for s in sources], sources, nli_labels
-        )
+        hi_rf = predict_rf_hallucination_index(answer_vec_scores, answer_bm25, sources, nli_labels)
         return {"ars": ars, "hi_eq": hi_eq, "hi_rf": hi_rf, "nli": nli_labels}
 
     def predict(self, request: ResponsesAgentRequest) -> ResponsesAgentResponse:
@@ -507,16 +648,42 @@ class MyGPTRagAgent(ResponsesAgent):
         self._last_retrieve_error = None
         cfg = self._config(dataset)
         model_endpoint = MODEL_ALIASES.get(model_alias, MODEL_ALIASES["sonnet"])
+        # Phase 6: questions are assumed English (MyGPT's assumption) unless the caller says
+        # otherwise; `translate: false` turns translation off for eval A/B runs, and
+        # `translate_answer` overrides the config's answer-for-scoring translation.
+        query_language = str(ci.get("query_language") or "english").lower()
+        doc_language = cfg.documents_language
+        translate = (
+            cfg.translate_query and _as_bool(ci.get("translate", True))
+            and doc_language in LANGUAGES and doc_language != query_language
+        )
+        # The mixed "all corpora" scope has no single document language: no translation,
+        # and each source is reranked for its own corpus' language.
+        mixed_scope = corpus is None and provided is None
         try:
             # Tags let eval runs and production monitoring slice traces per corpus/model.
             mlflow.update_current_trace(tags={
                 "mygpt.corpus": corpus or "all", "mygpt.dataset": dataset, "mygpt.model": model_endpoint,
                 "mygpt.retrieval": "provided" if provided is not None else "ai_search",
+                "mygpt.language": doc_language, "mygpt.translated": str(translate).lower(),
             })
         except Exception:  # noqa: BLE001  (no active trace, e.g. tracing disabled)
             pass
 
-        sources = self._retrieve_traced(query, corpus, focus, k, provided)
+        translated_query, translate_errors = None, []
+        search_query = query
+        if translate:
+            translated, err = self._translate(query, query_language, doc_language)
+            if err:  # search with the original question; report no translation
+                translate_errors.append(f"query: {err}")
+            else:
+                translated_query = search_query = translated
+        language_outputs = {
+            "documents_language": doc_language, "translated_query": translated_query,
+            "translate_error": "; ".join(translate_errors) or None,
+        }
+
+        sources = self._retrieve_traced(search_query, corpus, focus, k, provided)
         trace_id = _active_trace_id()
         if not sources:
             item = self.create_text_output_item(
@@ -527,12 +694,25 @@ class MyGPTRagAgent(ResponsesAgent):
                 "qrs": 0, "ars": 0, "hi_eq": 100, "hi_rf": None, "sources": [], "trace_id": trace_id,
                 # Surface the caught retrieval error instead of silently returning [].
                 "retrieve_error": getattr(self, "_last_retrieve_error", None),
+                **language_outputs, "translated_answer": None,
             })
 
-        sources = self._rerank(query, sources, cfg)
+        sources = self._rerank(search_query, sources, cfg, per_source_language=mixed_scope)
         qrs, question_semantic, sources = self._score_question(sources, cfg)
+        # The model sees the original question, so it answers in the user's language.
         answer = self._generate(query, sources, model_alias, instructions)
-        ans = self._score_answer(answer, sources, question_semantic, cfg)
+        # ...and, with translate_answer, scored in the documents' language (MyGPT scores the
+        # translated answer: embedding distance, BM25 and NLI). Off by default (latency).
+        translated_answer, scored_answer = None, answer
+        translate_answer = translate and _as_bool(ci.get("translate_answer", cfg.translate_answer))
+        if translate_answer and answer:
+            translated, err = self._translate(answer, query_language, doc_language)
+            if err:  # score the original answer
+                translate_errors.append(f"answer: {err}")
+                language_outputs["translate_error"] = "; ".join(translate_errors)
+            else:
+                translated_answer = scored_answer = translated
+        ans = self._score_answer(scored_answer, sources, question_semantic, cfg)
         for s, label in zip(sources, ans["nli"]):
             s["nli"] = label
 
@@ -544,11 +724,14 @@ class MyGPTRagAgent(ResponsesAgent):
                 "qrs": qrs, "ars": ans["ars"], "hi_eq": ans["hi_eq"], "hi_rf": ans["hi_rf"],
                 # lets the app attach user feedback to this trace (Phase 4)
                 "trace_id": trace_id,
+                **language_outputs, "translated_answer": translated_answer,
+                "reranker": cfg.reranker if cfg.use_reranker else None,
                 "sources": [
                     {
                         "source_name": s["source_name"], "corpus": s["corpus"], "section": s["section"], "page": s["page"],
                         "snippet": s["context"][:240], "vector_score": s.get("vector_score"),
                         "bm25_score": s.get("bm25_score"), "rerank_score": s.get("rerank_score"), "nli": s.get("nli"),
+                        "answer_bm25_score": s.get("answer_bm25_score"), "reranker": s.get("reranker"),
                         # Phase 5: the Supervisor asks for the full chunk text so its own
                         # RETRIEVER span can feed the groundedness judges.
                         **({"chunk_id": s["chunk_id"], "context": s["context"]} if include_context else {}),
@@ -605,6 +788,24 @@ def sources_from_inputs(raw: Any, k: int) -> list[dict]:
         if len(out) >= max(1, min(int(k), MAX_PROVIDED_SOURCES)):
             break
     return out
+
+
+def _message_text(resp: Any) -> str:
+    """Answer text of a chat-completions response."""
+    choices = (resp or {}).get("choices") or []
+    if not choices:
+        return ""
+    content = (choices[0].get("message") or {}).get("content") or ""
+    if isinstance(content, list):
+        # Reasoning-capable models (e.g. Claude Sonnet 5) can return content blocks —
+        # [{"type": "reasoning", "summary": [...]}, {"type": "text", "text": ...}].
+        # Keep only the answer text; passing the blocks on broke _embed (bge-m3
+        # rejects dict inputs) and leaked reasoning into the answer.
+        content = "".join(
+            part.get("text", "") for part in content
+            if isinstance(part, dict) and part.get("type") in ("text", "output_text")
+        )
+    return str(content).strip()
 
 
 def _active_trace_id() -> str | None:

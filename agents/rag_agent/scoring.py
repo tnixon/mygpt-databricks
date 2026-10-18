@@ -14,6 +14,8 @@ Source map (verbatim behaviour preserved):
   - ``apis.save_answer`` ARS vector scoring       -> ``answer_vector_scores``
   - ``apis.save_answer`` ARS assembly             -> ``answer_relevance_score``
   - ``apis.save_answer`` HI-by-equation           -> ``hallucination_index_equation``
+  - ``bm25_utils.get_answer_distance_by_context_bm25`` + the ``apis.save_answer``
+    keyword term                                  -> ``answer_bm25_scores`` / ``answer_keyword_score``
 
 Known MyGPT quirks preserved on purpose (see inline notes):
   - QRS uses the mean *normalized* BM25 score (0-1) for the keyword term, whereas
@@ -26,8 +28,10 @@ Known MyGPT quirks preserved on purpose (see inline notes):
 
 from __future__ import annotations
 
+import math
+import re
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Any, Sequence
 
 
 # --------------------------------------------------------------------------- #
@@ -233,3 +237,72 @@ def _clamp_0_100(value: float) -> float:
     if value > 100:
         return 100.0
     return float(value)
+
+
+# --------------------------------------------------------------------------- #
+# Answer-side BM25 (Phase 6)
+# --------------------------------------------------------------------------- #
+# MyGPT indexes the retrieved contexts with bm25s (method "lucene", k1=1.5, b=0.75) and a
+# PyStemmer stemmer for the documents' language, then scores the (translated) answer
+# against them. Re-implemented in memory here (no bm25s temp-dir round trip). One
+# deliberate deviation: the token pattern keeps Devanagari vowel signs / viramas inside
+# words, which bm25s' \w\w+ splits on.
+_TOKEN_RE = re.compile(r"[\w\u0900-\u097F]{2,}")
+_STEMMERS: dict[str, Any] = {}
+
+
+def _stemmer(language: str):
+    """PyStemmer (Snowball) stemmer for a MyGPT language name; None if unsupported."""
+    if language not in _STEMMERS:
+        try:
+            import Stemmer
+
+            _STEMMERS[language] = Stemmer.Stemmer(language)
+        except Exception:  # noqa: BLE001  ("unknown", or no PyStemmer)
+            _STEMMERS[language] = None
+    return _STEMMERS[language]
+
+
+def bm25_tokenize(text: str, language: str) -> list[str]:
+    tokens = _TOKEN_RE.findall(str(text).lower())
+    stemmer = _stemmer(language)
+    return stemmer.stemWords(tokens) if stemmer else tokens
+
+
+def answer_bm25_scores(
+    answer: str, contexts: Sequence[str], language: str, k1: float = 1.5, b: float = 0.75
+) -> list[float]:
+    """Raw BM25 of the answer against each context (same order), contexts as the corpus."""
+    docs = [bm25_tokenize(c, language) for c in contexts]
+    n = len(docs)
+    if n == 0:
+        return []
+    avgdl = (sum(len(d) for d in docs) / n) or 1.0
+    df: dict[str, int] = {}
+    for d in docs:
+        for t in set(d):
+            df[t] = df.get(t, 0) + 1
+    query = set(bm25_tokenize(answer, language))
+    scores = []
+    for d in docs:
+        tf: dict[str, int] = {}
+        for t in d:
+            if t in query:
+                tf[t] = tf.get(t, 0) + 1
+        norm = k1 * (1 - b + b * len(d) / avgdl)
+        scores.append(sum(
+            math.log(1 + (n - df[t] + 0.5) / (df[t] + 0.5)) * f / (f + norm) for t, f in tf.items()
+        ))
+    return scores
+
+
+def answer_keyword_score(raw_scores: Sequence[float], cfg: ScoringConfig) -> tuple[float, list[float]]:
+    """Per-source [0, 1] BM25 scores (min-max on bm25_best/worst) and their mean x100 —
+    the ``keyword_score`` MyGPT feeds into ARS."""
+    if not raw_scores:
+        return 0.0, []
+    scores = [
+        round(v, 3)
+        for v in min_max_normalization([round(r, 3) for r in raw_scores], cfg.bm25_best, cfg.bm25_worst)
+    ]
+    return round(sum(scores) / len(scores) * 100, 2), scores

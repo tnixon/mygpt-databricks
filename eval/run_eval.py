@@ -81,7 +81,7 @@ def persisted_results(run_id: str, require: tuple[str, ...] = (), timeout_s: int
         time.sleep(15)
 
 
-def endpoint_predict_fn(endpoint: str, model_alias: str):
+def endpoint_predict_fn(endpoint: str, model_alias: str, translate: bool | None = None):
     """predict_fn for the agent endpoint that ALWAYS copies the endpoint's returned trace
     into the eval run.
 
@@ -90,6 +90,9 @@ def endpoint_predict_fn(endpoint: str, model_alias: str):
     shared experiment) and then never hands that trace to evaluate(), which falls back to
     a root-only trace with no RETRIEVER span (RetrievalGroundedness / RetrievalRelevance
     then fail with "No retrieval context found"). This mirrors to_predict_fn's copy branch.
+
+    ``translate`` (Phase 6) overrides the agent's query/answer translation for an A/B run;
+    None leaves it to the dataset config.
     """
     from mlflow.deployments import get_deploy_client
     from mlflow.tracing.constant import DATABRICKS_OPTIONS_KEY, DATABRICKS_OUTPUT_KEY, RETURN_TRACE_OPTION_KEY
@@ -101,7 +104,8 @@ def endpoint_predict_fn(endpoint: str, model_alias: str):
         # Dataset rows are model-agnostic; the LLM under test is chosen per run.
         payload = {
             "input": input,
-            "custom_inputs": {**(custom_inputs or {}), "model": model_alias},
+            "custom_inputs": {**(custom_inputs or {}), "model": model_alias,
+                              **({"translate": translate} if translate is not None else {})},
             DATABRICKS_OPTIONS_KEY: {RETURN_TRACE_OPTION_KEY: True},
         }
         result = client.predict(endpoint=endpoint, inputs=payload)
@@ -265,6 +269,8 @@ def main() -> None:
     ap.add_argument("--experiment", default="/Shared/mygpt/mygpt-rag-agent")
     ap.add_argument("--max-rows", type=int, default=0, help="smoke-test on the first N rows (0 = all)")
     ap.add_argument("--gate", default="false", help="true = exit non-zero if eval/gates.yaml isn't met")
+    # Phase 6 A/B: auto = the dataset config decides (non-English corpora translate).
+    ap.add_argument("--translate", default="auto", choices=["auto", "true", "false"])
     # The agent endpoint is CPU Small (~4 concurrent requests, ~6s/row warm): keep eval
     # parallelism near that and allow for queueing / cold starts rather than timing out.
     ap.add_argument("--workers", type=int, default=4)
@@ -289,17 +295,19 @@ def main() -> None:
     if args.max_rows:
         data = data.to_df()[["inputs", "expectations"]].head(args.max_rows)
 
-    predict_fn = endpoint_predict_fn(args.endpoint, args.model)
+    translate = None if args.translate == "auto" else args.translate == "true"
+    predict_fn = endpoint_predict_fn(args.endpoint, args.model, translate)
 
     vocab = eval_datasets.expression_systems(base) if spec.use_case == "bluesky" else None
     model_id, served = served_model_id(args.endpoint)
 
-    with mlflow.start_run(run_name=f"{args.dataset}-{args.model}") as run:
+    run_name = f"{args.dataset}-{args.model}" + ("" if translate is None else f"-translate_{args.translate}")
+    with mlflow.start_run(run_name=run_name) as run:
         mlflow.set_tags({
             "mygpt.eval.dataset": spec.uc_table, "mygpt.eval.use_case": spec.use_case,
             "mygpt.eval.model_alias": args.model, "mygpt.eval.endpoint": args.endpoint,
             "mygpt.eval.served_model": served or "", "mygpt.eval.git_sha": args.git_sha,
-            "mygpt.eval.max_rows": str(args.max_rows),
+            "mygpt.eval.max_rows": str(args.max_rows), "mygpt.eval.translate": args.translate,
         })
         # The gates in force for this run, so the benchmarks dashboard can show pass / fail.
         gates_file = os.path.join(base, "eval", "gates.yaml")

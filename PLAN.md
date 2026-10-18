@@ -388,6 +388,8 @@ already have. Details are in `eval/README.md`.
   default governed library: no history, feedback or uploads.
 
 ### Deploy order
+Status (2026-10-18): steps 1, 2, 4, 5 and the step-7 A/B are done. Step 3 is waiting on the
+Hindi PDFs, and step 6 on `native_questions.csv`. The build ran without the native slice.
 1. `databricks bundle deploy -p mygpt --var warehouse_id=<id>` at the repo root. This creates
    the Lakebase project, the uploads volume and the ingest job, and syncs the agent code.
 2. `databricks bundle run mygpt_deploy_agent -p mygpt --var warehouse_id=<id>`. This deploys
@@ -480,8 +482,178 @@ already have. Details are in `eval/README.md`.
 - **Build:** per-dataset document language; query/answer translation; language-specific BM25 stemmers and rerankers; Devanagari/garbled-text parse fallback.
 - **Replicates:** translation fields + `translategemma` flow, language-specific stemmers/rerankers, pypdf→PyMuPDF fallback.
 - **Databricks:** FMAPI/Model Serving (translation + multilingual rerank/embeddings), AI Search, the `mygpt_etl` ingestion lane.
-- **Depends on:** Phases 1, 2. The Devanagari/garbled-text parse fallback goes into `etl/sql/02_parse_chunk_index.sql`.
+- **Depends on:** Phases 1, 2. The Devanagari/garbled-text parse fallback sits between `etl/sql/02_parse_chunk_index.sql` and `02b_chunk_merge.sql` (`etl/parse_fallback.py`).
 - **Closes gaps:** 10.
+
+**Settled design (plan approved 2026-10-16):**
+- **Translator:** `mygpt-translate`, a Unity AI Gateway chat endpoint →
+  `databricks-gemma-3-12b`, the base model of MyGPT's translategemma. It uses MyGPT's prompt,
+  plus "return the text unchanged if it's already in the target language".
+- **Flow (MyGPT's).** When a dataset's documents aren't in the question's language
+  (`translate_query`; questions are assumed English unless `custom_inputs.query_language`
+  says otherwise):
+  - the **translated question** drives AI Search and rerank;
+  - the model gets the **original** question and answers in its language;
+  - optionally (`translate_answer`, **off by default**), the answer is translated into the
+    documents' language for ARS scoring only, as MyGPT does.
+  - Any translation failure falls back to the original text.
+- **Language comes from the corpus.** No per-chunk column and no index rebuild.
+  - The mixed "all corpora" scope doesn't translate.
+  - It reranks each source with the reranker for that source's corpus language.
+- **Rerankers:** `qnli-electra-base` for English (cutoff 0.10), MyGPT's
+  `mmarco-mMiniLMv2-L12-H384-v1` otherwise (cutoff 0.05). NLI stays English-only.
+- **Answer-side BM25 (`answer_bm25`, off by default):** a stemmed BM25 (Snowball via
+  PyStemmer, bm25s "lucene" math, in memory) of the answer over the retrieved contexts, as in
+  MyGPT. When on, it replaces the reused question-side hybrid score.
+- **Upload libraries:** each non-English language gets a `default_<language>` config row.
+  `unknown` uses the multilingual reranker and doesn't translate.
+- **Parse fallback:** MyGPT's pypdf → PyMuPDF heuristics, applied at document level after
+  `ai_parse_document`. The test corpus is the public Hindi `health_policies_hi`.
+
+### As-built (deployed 2026-10-17: agent v15, `mygpt-translate`, app migration 004)
+- **Agent:**
+  - `agents/rag_agent/agent.py` adds `_translate`, a per-model reranker cache, the
+    `answer_bm25_scores` / `answer_keyword_score` functions (mirrored in `scoring.py`), and a
+    language-driven packaged config (`dataset_language`, `CORPUS_LANGUAGE`).
+  - New `custom_inputs`: `translate` and `query_language`.
+  - New `custom_outputs`: `documents_language`, `translated_query`, `translated_answer`,
+    `translate_error`, `reranker`, plus per-source `reranker` / `answer_bm25_score`.
+  - Trace tags `mygpt.language` and `mygpt.translated`.
+  - The driver declares `mygpt-translate` as a resource. PyStemmer was added to the
+    requirements.
+- **Supervisor:** forwards `translate` / `query_language` and passes the translation outputs
+  through.
+- **Gateway:** `driver.py --task translate` and the `smoke_test.py --task translate` check; job
+  `mygpt_deploy_translate_gateway`.
+- **Config:** `dataset_config` gains `translate_query`, `translate_answer` and `answer_bm25`
+  (the last two off; see the v14 live check).
+  - The FR/ES rows rerank with mmarco.
+  - New rows: `health_policies_hi` and `default_<language>`.
+  - `reranker_config` gets an mmarco row.
+- **ETL:**
+  - `02` was split at element staging. A new `parse_fallback` task
+    (`etl/parse_fallback.py`, PyMuPDF) feeds `chunk_merge` (`02b_chunk_merge.sql`).
+  - New table `doc_parse_quality`.
+  - Corpus `health_policies_hi` is in the allow-list; upload it with `make corpus-hi`.
+  - `upload_ingest.py` carries a tested copy of the fallback.
+- **App:**
+  - Migration `004`: the `translated_question_text` / `translated_answer_text` columns, the
+    "SJ Global health policies (HI)" library, and the `default_<language>` backfill.
+  - `configDatasetFor` gains the per-language rows; `unknown` is a library language.
+  - The chat and History UI show "Searched in French as: …" and "Answer as scored".
+- **Eval:**
+  - `mygpt_eval` takes a `translate` parameter (auto | true | false) for the A/B.
+  - New dataset `eval_health_policies_hi` (guidelines only).
+  - Native-language FR/ES slice (`gold = native`) from `eval/native_questions.csv`, produced
+    by `eval/translate_questions.py`.
+  - The `mygpt_grounding` guideline now reads "written in the same natural language as the
+    user's question (e.g. English or French)". It used to say "(English)". An intermediate
+    wording, "in the language of the question", made the judge read it as "follows the
+    question's instructions", and 84 of 210 FR rows failed on v15 for that reason.
+- **Tests (all passing):**
+  - `make eval-test`: 104 tests, including `test_multilingual.py`, the BM25 goldens and
+    `etl/test_parse_fallback.py` with a real PyMuPDF PDF.
+  - App vitest: 34 tests, including checks that the 004 seed, backfill and translations
+    persist, and that a `pg_ts_config` entry exists for every language (`hindi` included).
+  - `bundle validate` passes for both bundles.
+
+### Live check on v14 (2026-10-17) → defaults changed (v15)
+- **v14 worked as designed:** EN question → French `translated_query`, mmarco rerank 0.999 /
+  0.956 / 0.938 on French sources (was 0), English answer. A French question isn't
+  translated and is answered in French.
+- **Answer translation looked like it cost ~18 s warm** (28.6 s vs 10.9 s with
+  `translate: false`), since gemma regenerates Sonnet's long answer just to feed ARS.
+  → `translate_answer` is now a separate flag, **off**; bge-m3 scores the cross-lingual
+  answer directly. *Correction (v15):* the same pair took 24.3 s vs 21.2 s. Most of the v14
+  gap was Sonnet's answer length varying from call to call, so query translation costs
+  about 3 s and end-to-end latency is dominated by the long policy answers.
+- **ARS saturated with `answer_bm25`:** the regression query went from ARS 86 to 100. MyGPT's
+  answer keyword coefficient is negative (−2), and with the bootstrap `bm25_best = 20`, BM25
+  over k contexts gives low English scores (and > 1.0 normalized on long French answers).
+  → `answer_bm25` is **off** until the window is calibrated.
+- **Bug fixed:** a failed translation used to be reported as `translated_query` /
+  `translated_answer` holding the original text.
+- **Still open:** "objectifs … Algérie" (French, no document focus) still ranks the
+  Luxembourg plan first. This is a retrieval problem the reranker doesn't fix; the native
+  eval slice measures it.
+- The agent runs on its **packaged** config (no `MYGPT_WAREHOUSE_ID`), so flipping these
+  flags means editing `agent.py` and redeploying, not just `dataset_config`.
+
+### Eval A/B on v15 (2026-10-17): query translation off vs on
+Full FR/ES datasets (210 rows each), Sonnet, agent v15 (mmarco reranker in both arms).
+Runs: `health_policies_{fr,es}-sonnet-translate_{false,true}` in `/Shared/mygpt/mygpt-rag-agent`.
+v12 is the Phase-2 baseline (no reranker, no translation).
+
+| Metric | FR v12 | FR off → on | ES v12 | ES off → on |
+|---|---|---|---|---|
+| `yes_no_correct` | 0.771 | 0.767 → 0.790 | 0.695 | 0.690 → 0.695 |
+| `yes_no_correct/sme` (160 rows; MyGPT 0.841) | 0.806 | 0.812 → 0.825 | 0.744 | 0.738 → 0.756 |
+| `yes_no_correct/inherited` (50 rows) | 0.660 | 0.620 → 0.680 | 0.540 | 0.540 → 0.500 |
+| `gold_correctness` | 0.759 | 0.745 → 0.773 | 0.672 | 0.703 → 0.727 |
+| `retrieval_groundedness` | 0.633 | 0.652 → 0.662 | 0.605 | 0.600 → 0.571 |
+| HI-vs-groundedness AUROC | 0.676 | 0.654 → 0.692 | 0.611 | 0.572 → 0.686 |
+| QRS (mean) | 65.9 | 61.6 → 61.0 | 65.6 | 61.5 → 62.6 |
+| `mygpt_grounding` | 0.729 | (old wording) → 0.795 | 0.724 | (old wording) → 0.757 |
+
+- **mmarco reranker alone** (v12 → v15 with translation off) is accuracy-neutral: every
+  change is within about ±0.04. QRS drops about 4 points because the rerank term is no
+  longer 0, and MyGPT's `c_qrank` is −1.
+- **Query translation** helps a little and isn't significant.
+  - FR improves on every accuracy metric: +2 on yes/no, +3 on `gold_correctness`, +6 on the
+    keyword-free variants.
+  - ES is mixed: SME yes/no +2 and `gold_correctness` +2, but the variants fall 4 and
+    groundedness falls 3.
+  - Standard error is about ±3 points on 160 rows and about ±7 on 50, so none of these
+    changes is clearly beyond noise.
+  - FR SME accuracy (0.825) is now close to MyGPT's 0.841; ES (0.756) is still short.
+  - AUROC improves on both, so HI tracks unsupported answers somewhat better.
+- **Decision:** keep query translation on (the default; MyGPT parity; about 3 s).
+- **The remaining SJ Global gap isn't about language.** The keyword-free variants trail
+  the hinted questions by 15–25 points, and the "objectifs … Algérie" query still ranks the
+  wrong plan first. That points to retrieval and document focus on these corpora.
+- **Gates:** every SJ Global gate passes on both arms except ES `retrieval_groundedness`
+  with translation on (0.571 vs 0.58).
+
+### Open questions
+- **Gates (to be decided later).** Should `eval/gates.yaml` be reset for Phase 6, and how?
+  ES `retrieval_groundedness` fails its 0.58 gate with translation on (0.571), and every
+  other change in this A/B is within noise.
+  - Options: a paired, row-by-row off/on comparison (no new endpoint calls) to separate real
+    changes from judge noise; a repeat run; or keeping the current gates. Undecided.
+  - Until then `eval/gates.yaml` is unchanged, and `gate=true` runs would fail on ES
+    groundedness.
+
+### Deploy order (Phase 6)
+1. `databricks bundle deploy -p mygpt --var warehouse_id=<id>` at the repo root.
+2. `bundle run mygpt_deploy_translate_gateway`, then
+   `python agents/gateway/smoke_test.py --task translate`.
+3. `make corpus-hi HI_PDFS=<dir> PROFILE=mygpt`, then `bundle run mygpt_etl`. Check
+   `doc_parse_quality` and the `sync_index` row count.
+4. `bundle run mygpt_deploy_agent`.
+5. In `app/`: `bundle deploy` (with the usual vars), then `bundle run app`. Check the logs for
+   migration `004`. **Run the app's own `bundle deploy` first:** a `bundle run app` without
+   it restarted the app on the pre-Phase-6 source (2026-10-17).
+6. `python eval/translate_questions.py` → review and commit `eval/native_questions.csv`, then
+   `bundle run mygpt_eval_build_datasets`.
+7. Run the eval A/B: FR/ES with `translate=false`, then `translate=true` (done, see above).
+   Then run the full matrix to re-baseline. Resetting `eval/gates.yaml` is an open question.
+
+### Watch-items
+- **Spikes:** the translation and reranker spikes are covered by the live checks and the
+  A/B. gemma's translations are accurate, about 1.1–2 s each, and the no-op rule holds.
+  mmarco separates relevant French chunks (0.94–0.999) from the rest. Still open: whether
+  `ai_parse_document` keeps Devanagari, which waits on the Hindi corpus.
+- **Latency:** one extra gemma call per translated query (about 3 s; answer translation is
+  off), and mmarco downloads on a cold start (first calls after a deploy took 33–38 s).
+- **AI Search keyword analysis** for FR/ES/HI isn't configurable. Translation helps it but
+  can't stem it.
+- **Answer-BM25** (off): before turning it on, calibrate `bm25_best/worst` for BM25 over k
+  contexts. Its IDF over only k contexts is noisy, as in MyGPT.
+- **Eval trace inspection from a laptop:** `mlflow.search_traces` must pass
+  `include_spans=False`. Downloading spans fails with a 401 (artifact credentials) under the
+  CLI OAuth profile; assessments are still returned.
+- **Lakebase `hindi` text-search config:** it exists in PGlite (PG 17). Confirm on Lakebase
+  with `SELECT cfgname FROM pg_ts_config`.
 
 ## Phase 7 — Full research-assistant UX parity (capstone)
 - **Goal:** bring the kept-minimal chat UI up to MyGPT's distinctive front-end.

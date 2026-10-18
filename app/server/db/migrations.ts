@@ -316,4 +316,24 @@ SET config_dataset = CASE documents_language
 WHERE kind = 'upload' AND config_dataset = 'mygpt';
 `,
   },
+  {
+    // Phase 6 (multilingual): MyGPT's translation fields; the Hindi governed corpus; and
+    // per-language scoring configs (dataset_config default_<language>) for upload
+    // libraries that 003 left on the English `mygpt` config.
+    id: '004_multilingual',
+    sql: `
+SELECT set_config('mygpt.role', 'admin', true);
+ALTER TABLE {{schema}}.questions ADD COLUMN IF NOT EXISTS translated_question_text text;
+ALTER TABLE {{schema}}.answers ADD COLUMN IF NOT EXISTS translated_answer_text text;
+INSERT INTO {{schema}}.libraries
+  (name, description, owner_email, visibility, kind, corpus, config_dataset, documents_language, status, is_default)
+VALUES
+  ('SJ Global health policies (HI)', 'Public Hindi health-policy PDFs.',
+   'system', 'public', 'corpus', 'health_policies_hi', 'health_policies_hi', 'hindi', 'ready', false)
+ON CONFLICT (owner_email, name) DO NOTHING;
+UPDATE {{schema}}.libraries
+SET config_dataset = 'default_' || documents_language, updated_at = now()
+WHERE kind = 'upload' AND config_dataset = 'mygpt' AND documents_language <> 'english';
+`,
+  },
 ];

@@ -25,6 +25,12 @@ export interface AgentCustomOutputs {
   sources?: AgentSource[];
   trace_id?: string | null;
   retrieve_error?: string | null;
+  // Phase 6: non-English corpora — the question as searched / the answer as scored, in the
+  // documents' language (null when no translation applied).
+  documents_language?: string;
+  translated_query?: string | null;
+  translated_answer?: string | null;
+  translate_error?: string | null;
 }
 
 interface AgentResponse {

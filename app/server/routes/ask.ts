@@ -123,6 +123,9 @@ export function registerAskRoutes(app: Application, deps: Deps) {
       hi_rf: outputs.hi_rf ?? null,
       model: outputs.model ?? input.model,
       library_id: lib.id,
+      documents_language: outputs.documents_language ?? lib.documents_language,
+      translated_query: outputs.translated_query ?? null,
+      translated_answer: outputs.translated_answer ?? null,
     };
 
     // Persist the turn into the user's conversation (Lakebase mode, signed-in users only).
@@ -140,7 +143,9 @@ export function registerAskRoutes(app: Application, deps: Deps) {
             model: input.model,
             focus: input.focus,
             qrs: result.qrs,
+            translated_question_text: result.translated_query,
             answer_text: answer,
+            translated_answer_text: result.translated_answer,
             ars: result.ars,
             hi_eq: result.hi_eq,
             hi_rf: result.hi_rf,

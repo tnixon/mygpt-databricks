@@ -314,7 +314,10 @@ class MyGPTSupervisor(ResponsesAgent):
     def search_documents(self, args: dict, ci: dict, state: dict) -> dict:
         """Call the RAG agent inside the app's scope. The LLM can narrow corpus / documents /
         section, never widen them; upload-library hits (ci.sources) are forwarded as-is."""
-        rag_ci: dict[str, Any] = {k: ci[k] for k in ("dataset", "model", "k", "instructions", "sources") if k in ci}
+        rag_ci: dict[str, Any] = {
+            k: ci[k] for k in ("dataset", "model", "k", "instructions", "sources", "translate", "query_language")
+            if k in ci
+        }
         rag_ci["include_context"] = True
         app_corpus = ci.get("corpus") or None
         # A corpus choice only narrows the all-governed-documents scope; upload libraries
@@ -524,6 +527,9 @@ class MyGPTSupervisor(ResponsesAgent):
             "qrs": rag.get("qrs"), "ars": rag.get("ars"), "hi_eq": rag.get("hi_eq"), "hi_rf": rag.get("hi_rf"),
             "sources": rag.get("sources") or [],
             "retrieve_error": rag.get("retrieve_error"),
+            # Phase 6: the RAG agent's translation of the question / answer (non-English corpora).
+            **{k: rag.get(k) for k in ("documents_language", "translated_query", "translated_answer",
+                                       "translate_error", "reranker")},
             # Feedback lands on the RAG trace when there is one (it holds the retrieval), else here.
             "trace_id": rag.get("trace_id") or trace_id,
             "supervisor_trace_id": trace_id,

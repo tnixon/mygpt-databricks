@@ -4,10 +4,12 @@ Run by the `mygpt_upload_ingest` DABs job, which the app triggers after a user u
 (app/server/ingest.ts; one active run per library). For the library's documents in status
 `uploaded` (or `parsing`, left over by a run that died) this job:
   1. parses them with ai_parse_document (serverless Spark), straight from the uploads volume;
-  2. section-chunks them with the SAME SQL as etl/sql/02_parse_chunk_index.sql steps 3 + 5
+  2. section-chunks them with the SAME SQL as etl/sql/02_parse_chunk_index.sql step 3 + 02b_chunk_merge.sql step 5
      (titles / section headers start a section; ~1000-char section-bounded buckets) —
      inlined below because a serverless spark_python_task can't import sibling modules;
      keep the two in sync;
+     Phase 6: documents whose parsed text is garbled or lacks its script (Hindi without
+     Devanagari) are re-extracted with PyMuPDF first, as in the mygpt_etl job;
   3. embeds the chunks with bge-m3 through the `mygpt-embeddings` gateway endpoint (driver-side
      batches: upload libraries are small, and this is the same REST path the agent uses);
   4. writes each document's chunks to Lakebase in ONE transaction per document (delete old,
@@ -37,6 +39,114 @@ TS_CONFIGS = {
     "german": "german", "italian": "italian", "dutch": "dutch", "arabic": "arabic",
     "hungarian": "hungarian", "hindi": "hindi",
 }
+
+# --- Parse fallback heuristics: a COPY of etl/parse_fallback.py (a serverless
+# spark_python_task can't import sibling modules). etl/test_parse_fallback.py checks
+# the two copies agree; change both together.
+CID_RE = re.compile(r"\(cid:\d+\)")
+DEVANAGARI_RE = re.compile(r"[\u0900-\u097F]")
+SCRIPT_RE = {"hindi": DEVANAGARI_RE}
+HEADER_FONT_RATIO = 1.2
+HEADER_MAX_CHARS = 120
+
+
+def is_probably_garbled(text: str) -> bool:
+    stripped = (text or "").strip()
+    if not stripped:
+        return True
+    if len(CID_RE.findall(stripped)) >= 3:
+        return True
+    bad = stripped.count("\ufffd") + stripped.count("\x00")
+    return bad / max(len(stripped), 1) > 0.02
+
+
+def fallback_reason(text: str, language: str) -> str | None:
+    stripped = (text or "").strip()
+    if not stripped:
+        return "empty"
+    if len(CID_RE.findall(stripped)) >= 3:
+        return "cid_markers"
+    if is_probably_garbled(stripped):
+        return "replacement_chars"
+    script = SCRIPT_RE.get(language)
+    if script and not script.search(stripped):
+        return "missing_script"
+    return None
+
+
+def prefer_fitz(original: str, fitz_text: str, language: str) -> bool:
+    if not (fitz_text or "").strip():
+        return False
+    if is_probably_garbled(original) and not is_probably_garbled(fitz_text):
+        return True
+    script = SCRIPT_RE.get(language, DEVANAGARI_RE)
+    if not script.search(original or "") and script.search(fitz_text):
+        return True
+    return not (original or "").strip()
+
+
+def blocks_to_elements(pages: list[list[tuple[str, float]]]) -> list[dict]:
+    import statistics
+
+    sizes = [size for page in pages for _, size in page if size]
+    median = statistics.median(sizes) if sizes else 0.0
+    rows, section, idx = [], "(no section)", 0
+    for page_no, page in enumerate(pages):
+        for text, size in page:
+            text = " ".join(text.split())
+            if not text:
+                continue
+            is_header = bool(median) and len(text) <= HEADER_MAX_CHARS and size >= HEADER_FONT_RATIO * median
+            if is_header:
+                section = text
+            rows.append({
+                "idx": idx, "elem_type": "section_header" if is_header else "text",
+                "page": page_no, "content": text,
+                "header_text": text if is_header else None, "section": section,
+            })
+            idx += 1
+    return rows
+
+
+def pdf_blocks(path: str) -> list[list[tuple[str, float]]]:
+    import fitz  # PyMuPDF
+
+    pages = []
+    with fitz.open(path) as doc:
+        for page in doc:
+            blocks = []
+            for b in page.get_text("dict").get("blocks", []):
+                spans = [s for line in b.get("lines", []) for s in line.get("spans", [])]
+                text = "\n".join("".join(s.get("text", "") for s in line.get("spans", [])) for line in b.get("lines", []))
+                if spans and text.strip():
+                    blocks.append((text, max(float(s.get("size") or 0) for s in spans)))
+            pages.append(blocks)
+    return pages
+# --- end of the parse_fallback.py copy
+
+
+def with_parse_fallback(elements: list[dict], docs: list[tuple], language: str) -> list[dict]:
+    """Replace the elements of garbled / script-less documents with PyMuPDF's when better."""
+    by_doc: dict[str, list[dict]] = {}
+    for e in elements:
+        by_doc.setdefault(e["doc_id"], []).append(e)
+    out: list[dict] = []
+    for doc_id, path, filename in docs:
+        rows = sorted(by_doc.get(doc_id, []), key=lambda e: e["idx"])
+        text = "\n".join(e["content"] or "" for e in rows)
+        reason = fallback_reason(text, language)
+        if reason:
+            try:
+                fitz_rows = blocks_to_elements(pdf_blocks(path))
+                if prefer_fitz(text, "\n".join(r["content"] for r in fitz_rows), language):
+                    rows = [{"doc_id": doc_id, **{k: r[k] for k in ("idx", "elem_type", "page", "content", "section")}}
+                            for r in fitz_rows]
+                    reason += " -> pymupdf"
+            except Exception as exc:  # noqa: BLE001  (keep the ai_parse_document output)
+                reason += f"; pymupdf failed: {type(exc).__name__}: {exc}"
+            print(f"[ingest] {filename}: parse fallback ({reason})")
+        out.extend(rows)
+    return out
 
 # ai_parse_document -> section-tagged elements (mirror of 02 step 3).
 ELEMENTS_SQL = """
@@ -72,7 +182,7 @@ SELECT
 FROM tagged
 """
 
-# Elements -> ~1000-char section-bounded chunks (mirror of 02 step 5).
+# Elements -> ~1000-char section-bounded chunks (mirror of 02b step 5).
 CHUNKS_SQL = """
 WITH body AS (
   SELECT doc_id, idx, page, section, content
@@ -170,7 +280,8 @@ def main() -> None:
         row = cur.fetchone()
         if row is None:
             sys.exit(f"upload library {args.library_id} not found")
-        ts_config = TS_CONFIGS.get(row[0].lower(), "simple")
+        language = row[0].lower()
+        ts_config = TS_CONFIGS.get(language, "simple")
         cur.execute(
             f"""UPDATE {s}.library_documents SET status = 'parsing', error = NULL, updated_at = now()
                 WHERE library_id = %s AND status IN ('uploaded', 'parsing')
@@ -187,8 +298,13 @@ def main() -> None:
         spark = SparkSession.builder.getOrCreate()
         spark.createDataFrame(docs, "doc_id string, volume_path string, filename string").createOrReplaceTempView("_upload_docs")
         folder = docs[0][1].rsplit("/", 1)[0] + "/"  # every upload of a library shares its folder
-        # No .cache(): PERSIST isn't supported on serverless. The view is read once, by CHUNKS_SQL.
-        spark.sql(ELEMENTS_SQL.format(folder=folder.replace("'", "''"))).createOrReplaceTempView("_upload_elements")
+        # Collected once (upload libraries are small; no .cache() on serverless), so
+        # ai_parse_document runs once while the parse fallback and CHUNKS_SQL both read it.
+        elements = [r.asDict() for r in spark.sql(ELEMENTS_SQL.format(folder=folder.replace("'", "''"))).collect()]
+        elements = with_parse_fallback(elements, docs, language)
+        spark.createDataFrame(
+            elements, "doc_id string, idx int, elem_type string, page int, content string, section string"
+        ).createOrReplaceTempView("_upload_elements")
         chunks = [r.asDict() for r in spark.sql(CHUNKS_SQL).collect()]
         print(f"[ingest] {len(chunks)} chunk(s) from {len({c['doc_id'] for c in chunks})} document(s)")
         vectors = embed(w, args.embed_endpoint, [c["chunk_text"] for c in chunks]) if chunks else []
