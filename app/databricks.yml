@@ -38,7 +38,8 @@ resources:
       user_api_scopes:
         - serving.serving-endpoints
 
-      # FMAPI foundation-model endpoints (direct chat) + the MyGPT agent endpoint, and the
+      # FMAPI foundation-model endpoints (direct chat) + the MyGPT Supervisor endpoint (it calls
+      # mygpt-rag-agent, Genie and the tools with its own credentials), and the
       # Phase 4 state: Lakebase, the embeddings gateway, the uploads volume, the ingest job,
       # the section-catalogue warehouse/table, and the shared experiment.
       resources:
@@ -56,7 +57,7 @@ resources:
             permission: CAN_QUERY
         - name: agent-endpoint
           serving_endpoint:
-            name: mygpt-rag-agent
+            name: mygpt-supervisor
             permission: CAN_QUERY
         - name: embeddings-endpoint
           serving_endpoint:

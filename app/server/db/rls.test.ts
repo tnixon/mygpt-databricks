@@ -190,9 +190,9 @@ describe('library visibility', () => {
         ars: 80, hi_eq: 5, hi_rf: null, model_endpoint: 'x', trace_id: 'tr-1', custom_outputs: {},
         sources: [{ rank: 1, source_name: 'a.pdf', page: 1, snippet: 's' }],
       });
-      privateConv = await withUser(db, alice, (q) => store.createConversation(q, alice.email, privateLib, 'mine'));
+      privateConv = await withUser(db, alice, (q) => store.createConversation(q, alice.email, [privateLib], 'mine'));
       await withUser(db, alice, (q) => store.saveTurn(q, turn(privateConv)));
-      sharedConv = await withUser(db, alice, (q) => store.createConversation(q, alice.email, groupLib, 'lab'));
+      sharedConv = await withUser(db, alice, (q) => store.createConversation(q, alice.email, [groupLib], 'lab'));
       sharedAnswer = (await withUser(db, alice, (q) => store.saveTurn(q, turn(sharedConv)))).answer_id;
     });
 
@@ -219,10 +219,27 @@ describe('library visibility', () => {
       ).rejects.toThrow(/row-level security/);
     });
 
+    it('a multi-library conversation stays owner-only, even when one library shares history', async () => {
+      const multi = await withUser(db, alice, (q) => store.createConversation(q, alice.email, [groupLib, privateLib], 'both'));
+      await withUser(db, alice, (q) => store.saveTurn(q, {
+        conversation_id: multi, question_text: 'q', model: 'sonnet', focus: {}, qrs: null, answer_text: 'merged',
+        ars: null, hi_eq: null, hi_rf: null, model_endpoint: null, trace_id: null,
+        custom_outputs: { scores_scope: 'per_library' },
+        sources: [{ rank: 1, library_id: groupLib, source_name: 'g.pdf' }, { rank: 2, library_id: privateLib, source_name: 'p.pdf' }],
+      }));
+      const mine = await withUser(db, alice, (q) => store.getConversation(q, alice.email, multi));
+      expect(mine?.conversation.library_id).toBeNull();
+      expect(mine?.conversation.library_ids).toEqual([groupLib, privateLib]);
+      expect(mine?.turns[0].sources.map((s) => s.library_id)).toEqual([groupLib, privateLib]);
+      expect(mine?.turns[0].custom_outputs).toEqual({ scores_scope: 'per_library' });
+      expect(await withUser(db, alice, (q) => store.recentTurns(q, multi, 3))).toEqual([{ question: 'q', answer: 'merged' }]);
+      expect(await withUser(db, carol, (q) => store.getConversation(q, carol.email, multi))).toBeNull();
+    });
+
     it("users can't start a conversation as someone else or on a library they can't see", async () => {
-      await expect(withUser(db, bob, (q) => store.createConversation(q, alice.email, null, 'x')))
+      await expect(withUser(db, bob, (q) => store.createConversation(q, alice.email, [], 'x')))
         .rejects.toThrow(/row-level security/);
-      await expect(withUser(db, bob, (q) => store.createConversation(q, bob.email, privateLib, 'x')))
+      await expect(withUser(db, bob, (q) => store.createConversation(q, bob.email, [privateLib], 'x')))
         .rejects.toThrow(/row-level security/);
     });
 

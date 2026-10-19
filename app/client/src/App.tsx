@@ -11,6 +11,12 @@ import {
   Switch,
   Label,
   Badge,
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
   Alert,
   AlertTitle,
   AlertDescription,
@@ -23,8 +29,8 @@ import {
   useIsMobile,
   useServingStream,
 } from '@databricks/appkit-ui/react';
-import { Menu, Plus, Send } from 'lucide-react';
-import { api, MODELS, type Library, type ModelAlias, type SectionOption } from './api';
+import { ChevronDown, Menu, Plus, Send } from 'lucide-react';
+import { api, MODELS, ROUTES, type Library, type ModelAlias, type Route, type SectionOption } from './api';
 import { HistoryPage } from './HistoryPage';
 import { LibrariesPage } from './LibrariesPage';
 import { MessageBubble, type ChatMessage } from './MessageBubble';
@@ -115,6 +121,9 @@ export default function App() {
 // Chat
 // ---------------------------------------------------------------------------
 
+/** Libraries one question may search (= the server's MAX_ASK_LIBRARIES). */
+const MAX_LIBRARIES = 8;
+
 // Pull the text delta out of an OpenAI-compatible streaming chunk.
 function extractDelta(chunk: unknown): string {
   const c = chunk as { choices?: Array<{ delta?: { content?: string } }> };
@@ -131,7 +140,9 @@ function ChatPage() {
   const [asking, setAsking] = useState(false); // grounded request in flight
   const [user, setUser] = useState<string | null>(null);
   const [libraries, setLibraries] = useState<Library[]>([]);
-  const [libraryId, setLibraryId] = useState<string>('');
+  // The libraries the Supervisor may search; it picks the relevant ones per question.
+  const [libraryIds, setLibraryIds] = useState<string[]>([]);
+  const [route, setRoute] = useState<Route>('auto');
   const [conversationId, setConversationId] = useState<string | undefined>(undefined);
   const [sections, setSections] = useState<SectionOption[]>([]);
   const [focusSection, setFocusSection] = useState<string>('all');
@@ -142,11 +153,15 @@ function ChatPage() {
       .libraries()
       .then((d) => {
         // Only searchable libraries: governed corpora, and upload libraries with indexed docs.
-        const usable = d.libraries.filter((l) => l.kind === 'corpus' || l.status === 'ready');
+        // With per-corpus libraries present, the catch-all "All governed documents" would only
+        // overlap them, so it is offered only when there are none (stateless mode).
+        const ready = d.libraries.filter((l) => l.kind === 'corpus' || l.status === 'ready');
+        const corpora = ready.filter((l) => l.kind === 'corpus' && l.corpus);
+        const usable = corpora.length > 0 ? ready.filter((l) => l.kind === 'upload' || l.corpus) : ready;
         setLibraries(usable);
-        const requested = searchParams.get('library');
-        const initial = usable.find((l) => l.id === requested) ?? usable.find((l) => l.is_default) ?? usable[0];
-        setLibraryId((cur) => cur || initial?.id || '');
+        const requested = usable.find((l) => l.id === searchParams.get('library'));
+        const initial = requested ? [requested] : corpora.length > 0 ? corpora : usable.slice(0, 1);
+        setLibraryIds((cur) => (cur.length > 0 ? cur : initial.map((l) => l.id)));
       })
       .catch(() => setLibraries([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -160,7 +175,8 @@ function ChatPage() {
       .conversation(id)
       .then(({ conversation, turns }) => {
         setConversationId(conversation.shared ? undefined : conversation.id);
-        if (conversation.library_id) setLibraryId(conversation.library_id);
+        const ids = conversation.library_ids ?? (conversation.library_id ? [conversation.library_id] : []);
+        if (ids.length > 0) setLibraryIds(ids);
         setMessages(
           turns.flatMap((t): ChatMessage[] => [
             { role: 'user', content: t.question_text },
@@ -169,6 +185,9 @@ function ChatPage() {
               ars: t.ars, hi_eq: t.hi_eq, hi_rf: t.hi_rf, answer_id: t.answer_id, my_rating: t.my_rating,
               my_comment: t.my_comment, translated_query: t.translated_question_text,
               translated_answer: t.translated_answer_text,
+              route: t.custom_outputs?.route, scores_scope: t.custom_outputs?.scores_scope,
+              libraries_searched: t.custom_outputs?.libraries_searched, genie: t.custom_outputs?.genie,
+              tool_calls: t.custom_outputs?.tool_calls,
             },
           ]),
         );
@@ -177,24 +196,30 @@ function ChatPage() {
       .finally(() => setSearchParams({}, { replace: true }));
   }, [searchParams, setSearchParams]);
 
+  // Section focus applies to a single library (the catalogue is per library).
+  const singleLibrary = libraryIds.length === 1 ? libraryIds[0] : '';
   useEffect(() => {
-    if (!libraryId) return;
     setFocusSection('all');
+    if (!singleLibrary) {
+      setSections([]);
+      return;
+    }
     api
-      .sections(libraryId)
+      .sections(singleLibrary)
       .then((d) => setSections(d.sections ?? []))
       .catch(() => setSections([]));
-  }, [libraryId]);
+  }, [singleLibrary]);
 
   const newConversation = () => {
     setMessages([]);
     setConversationId(undefined);
   };
 
-  const selectLibrary = (id: string) => {
-    if (id === libraryId) return;
-    setLibraryId(id);
-    newConversation(); // a conversation belongs to one library
+  const toggleLibrary = (id: string) => {
+    const next = libraryIds.includes(id) ? libraryIds.filter((x) => x !== id) : [...libraryIds, id];
+    if (next.length === 0 || next.length > MAX_LIBRARIES) return;
+    setLibraryIds(next);
+    newConversation(); // a conversation belongs to one set of libraries
   };
 
   // Direct mode: stream straight from the model (no retrieval).
@@ -225,7 +250,8 @@ function ChatPage() {
       .ask({
         question,
         model,
-        library_id: libraryId || undefined,
+        library_ids: libraryIds,
+        route,
         conversation_id: conversationId,
         focus: focusSection !== 'all' ? { section: focusSection } : undefined,
       })
@@ -246,6 +272,11 @@ function ChatPage() {
             documents_language: d.documents_language,
             translated_query: d.translated_query,
             translated_answer: d.translated_answer,
+            route: d.route,
+            scores_scope: d.scores_scope,
+            libraries_searched: d.libraries_searched,
+            genie: d.genie,
+            tool_calls: d.tool_calls,
           },
         ]);
       })
@@ -276,7 +307,9 @@ function ChatPage() {
     }
   };
 
-  const library = libraries.find((l) => l.id === libraryId);
+  const selected = libraries.filter((l) => libraryIds.includes(l.id));
+  const libraryLabel =
+    selected.length === 1 ? selected[0].name : selected.length > 0 ? `${selected.length} libraries` : 'Libraries';
 
   return (
     <div className="mx-auto flex h-full max-w-3xl flex-col gap-4">
@@ -301,15 +334,41 @@ function ChatPage() {
           </Label>
         </div>
         {grounded && libraries.length > 0 && (
-          <Select value={libraryId} onValueChange={selectLibrary}>
-            <SelectTrigger className="w-64">
-              <SelectValue placeholder="Library" />
-            </SelectTrigger>
-            <SelectContent>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" className="w-64 justify-between font-normal">
+                <span className="truncate">{libraryLabel}</span>
+                <ChevronDown className="h-4 w-4 opacity-50" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent className="w-72">
+              <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
+                MyGPT searches the relevant ones per question
+              </DropdownMenuLabel>
+              <DropdownMenuSeparator />
               {libraries.map((l) => (
-                <SelectItem key={l.id} value={l.id}>
+                <DropdownMenuCheckboxItem
+                  key={l.id}
+                  checked={libraryIds.includes(l.id)}
+                  onCheckedChange={() => toggleLibrary(l.id)}
+                  onSelect={(e) => e.preventDefault()}
+                >
                   {l.name}
                   {l.kind === 'upload' ? ` · ${l.visibility}` : ''}
+                </DropdownMenuCheckboxItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
+        {grounded && (
+          <Select value={route} onValueChange={(v) => setRoute(v as Route)}>
+            <SelectTrigger className="w-44">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {ROUTES.map((r) => (
+                <SelectItem key={r.value} value={r.value}>
+                  {r.label}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -348,7 +407,7 @@ function ChatPage() {
               <h2 className="font-edge text-2xl font-bold text-foreground">Ask MyGPT</h2>
               <p className="mt-1 text-sm text-muted-foreground">
                 {grounded
-                  ? `Grounded in ${library?.name ?? 'St. Jude research documents'} — answers cite their sources.`
+                  ? `Grounded in ${selected.length === 1 ? selected[0].name : selected.length > 1 ? `${selected.length} libraries` : 'St. Jude research documents'}, plus structured data and PDB / PubMed tools — answers cite their sources.`
                   : 'Direct model chat (no document retrieval).'}
               </p>
             </div>

@@ -1,8 +1,9 @@
 // Runtime configuration (env vars set in app.yaml; see app/databricks.yml for the resources).
 
 export const config = {
-  // The MyGPT retrieval+scoring ResponsesAgent (its own Model Serving endpoint).
-  agentEndpoint: process.env.MYGPT_AGENT_ENDPOINT ?? 'mygpt-rag-agent',
+  // The MyGPT Supervisor ResponsesAgent (routes to documents / Genie / tools; it calls the
+  // mygpt-rag-agent endpoint itself, once per library it searches).
+  agentEndpoint: process.env.MYGPT_AGENT_ENDPOINT ?? 'mygpt-supervisor',
   // Unity AI Gateway embeddings endpoint (bge-m3) — embeds queries for upload-library search.
   embedEndpoint: process.env.MYGPT_EMBED_ENDPOINT ?? 'mygpt-embeddings',
   // SQL warehouse for the governed section catalogue (paper_sections). Unset = no sections.

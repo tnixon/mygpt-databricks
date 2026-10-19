@@ -1,15 +1,19 @@
-// Grounded RAG + section catalogue, per library.
+// Grounded questions (via the MyGPT Supervisor) + section catalogue, per library.
 //
-// /api/ask resolves the library under RLS (404 if not visible), then:
-//   * corpus library → the agent retrieves from AI Search (custom_inputs.corpus/dataset);
-//   * upload library → the app runs the Lakebase hybrid search and hands the hits to the
-//     agent as custom_inputs.sources; the agent still reranks, scores (QRS/ARS/HI) and answers.
-// The agent is called AS THE SIGNED-IN USER (OBO). The turn is then persisted to the user's
-// conversation; a persistence failure is logged but never drops the answer.
+// /api/ask resolves the selected libraries under RLS (404 if any isn't visible), then hands
+// them to the Supervisor as custom_inputs.libraries; it picks the ones to search per question:
+//   * corpus library → the RAG agent retrieves from AI Search (corpus / dataset);
+//   * upload library → the app runs the Lakebase hybrid search up front and hands the hits
+//     over as that library's `sources` (the agents never touch Lakebase); the RAG agent still
+//     reranks, scores (QRS/ARS/HI) and answers.
+// The Supervisor may instead (or also) route to Genie or the UC-function tools. Recent turns of
+// the conversation go along as input messages, so follow-ups resolve. The agent is called AS
+// THE SIGNED-IN USER (OBO). The turn is then persisted to the user's conversation; a
+// persistence failure is logged but never drops the answer.
 
 import type { Application } from 'express';
 import { createWorkspaceClient } from '@databricks/appkit';
-import { askAgent, type AgentCustomInputs } from '../agent';
+import { askAgent, type AgentLibraryInput, type AgentMessage, type ProvidedSource } from '../agent';
 import { config } from '../config';
 import { withUser, type Identity } from '../db/context';
 import type { Library } from '../db/store';
@@ -19,9 +23,30 @@ import { isUuid, parseAskInput } from '../validation';
 import { handle, type Deps } from './deps';
 import { STATELESS_DEFAULT } from './libraries';
 
+/** Earlier Q&A turns sent with a question (the Supervisor keeps its last 6 messages). */
+const HISTORY_TURNS = 3;
+
 async function resolveLibrary(deps: Deps, who: Identity, id: string | undefined): Promise<Library | null> {
   if (!deps.db) return STATELESS_DEFAULT;
   return withUser(deps.db, who, (q) => (id ? deps.store.getLibrary(q, id) : deps.store.getDefaultLibrary(q)));
+}
+
+/** The selected libraries (none = the default), or null if any isn't visible to the user. */
+async function resolveLibraries(deps: Deps, who: Identity, ids: string[]): Promise<Library[] | null> {
+  if (!deps.db) return [STATELESS_DEFAULT];
+  return withUser(deps.db, who, async (q) => {
+    if (ids.length === 0) {
+      const lib = await deps.store.getDefaultLibrary(q);
+      return lib ? [lib] : null;
+    }
+    const libs: Library[] = [];
+    for (const id of ids) {
+      const lib = await deps.store.getLibrary(q, id);
+      if (!lib) return null;
+      libs.push(lib);
+    }
+    return libs;
+  });
 }
 
 /** Governed section catalogue (paper_sections, built by the ETL) for a corpus library.
@@ -84,48 +109,77 @@ export function registerAskRoutes(app: Application, deps: Deps) {
     }
     const input = parsed.value;
     const who = await getIdentity(req);
-    const lib = await resolveLibrary(deps, who, input.library_id);
-    if (!lib) {
+    const libs = await resolveLibraries(deps, who, input.library_ids);
+    if (!libs) {
       res.status(404).json({ error: 'library not found' });
       return;
     }
+    const libraryIds = libs.map((l) => l.id);
 
-    const customInputs: AgentCustomInputs = {
-      dataset: lib.config_dataset,
-      model: input.model,
-      k: input.k,
-      focus: input.focus,
-    };
-    if (lib.kind === 'upload') {
-      if (!deps.db) throw new Error('upload library without Lakebase');
+    // Upload libraries: search Lakebase up front (one query embedding, one search per library);
+    // a library without hits is left out of what the Supervisor may search.
+    const hits = new Map<string, ProvidedSource[]>();
+    const uploads = libs.filter((l) => l.kind === 'upload');
+    if (uploads.length > 0) {
+      const db = deps.db;
+      if (!db) throw new Error('upload library without Lakebase');
       const vector = await embedQuery(input.question);
-      customInputs.sources = await withUser(deps.db, who, (q) =>
-        searchUploadLibrary(q, store.schema, lib, input.question, vector, input.focus, input.k));
-      if (customInputs.sources.length === 0) {
-        res.json({
-          answer: "I couldn't find anything relevant in this library's documents.",
-          sources: [], qrs: 0, ars: null, hi_eq: null, hi_rf: null, model: input.model,
-          library_id: lib.id, persisted: false,
-        });
-        return;
-      }
-    } else if (lib.corpus) {
-      customInputs.corpus = lib.corpus;
+      await Promise.all(uploads.map(async (lib) => {
+        hits.set(lib.id, await withUser(db, who, (q) =>
+          searchUploadLibrary(q, store.schema, lib, input.question, vector, input.focus, input.k)));
+      }));
+    }
+    const libraries: AgentLibraryInput[] = libs
+      .filter((l) => l.kind !== 'upload' || (hits.get(l.id)?.length ?? 0) > 0)
+      .map((l) => ({
+        id: l.id, name: l.name, kind: l.kind, description: l.description,
+        documents_language: l.documents_language, dataset: l.config_dataset,
+        ...(l.kind === 'upload' ? { sources: hits.get(l.id) } : l.corpus ? { corpus: l.corpus } : {}),
+      }));
+    if (libraries.length === 0 && input.route === 'docs') {
+      res.json({
+        answer: "I couldn't find anything relevant in these libraries' documents.",
+        sources: [], qrs: null, ars: null, hi_eq: null, hi_rf: null, model: input.model, library_ids: libraryIds,
+        route: [], scores_scope: null, libraries_searched: [], genie: null, tool_calls: [], persisted: false,
+      });
+      return;
     }
 
-    const { answer, outputs } = await askAgent(input.question, customInputs, userToken(req));
+    // Multi-turn context: recent turns of the user's own conversation (RLS), oldest first.
+    let history: AgentMessage[] = [];
+    if (deps.db && who.email && input.conversation_id) {
+      const conversationId = input.conversation_id;
+      const turns = await withUser(deps.db, who, async (q) =>
+        (await store.ownsConversation(q, conversationId, who.email)) ? store.recentTurns(q, conversationId, HISTORY_TURNS) : []);
+      history = turns.flatMap((t): AgentMessage[] => [
+        { role: 'user', content: t.question },
+        { role: 'assistant', content: t.answer },
+      ]);
+    }
+
+    const { answer, outputs } = await askAgent(
+      [...history, { role: 'user', content: input.question }],
+      { route: input.route, model: input.model, k: input.k, focus: input.focus, libraries },
+      userToken(req),
+    );
+    if (outputs.error) console.warn('[ask] supervisor reported', outputs.error);
     const result = {
       answer,
       sources: outputs.sources ?? [],
-      qrs: outputs.qrs ?? 0,
+      qrs: outputs.qrs ?? null,
       ars: outputs.ars ?? null,
       hi_eq: outputs.hi_eq ?? null,
       hi_rf: outputs.hi_rf ?? null,
       model: outputs.model ?? input.model,
-      library_id: lib.id,
-      documents_language: outputs.documents_language ?? lib.documents_language,
+      library_ids: libraryIds,
+      documents_language: outputs.documents_language ?? (libs.length === 1 ? libs[0].documents_language : undefined),
       translated_query: outputs.translated_query ?? null,
       translated_answer: outputs.translated_answer ?? null,
+      route: outputs.route ?? [],
+      scores_scope: outputs.scores_scope ?? null,
+      libraries_searched: outputs.libraries_searched ?? [],
+      genie: outputs.genie ?? null,
+      tool_calls: (outputs.tool_calls ?? []).map(({ name, ok, latency_ms }) => ({ name, ok, latency_ms })),
     };
 
     // Persist the turn into the user's conversation (Lakebase mode, signed-in users only).
@@ -135,7 +189,7 @@ export function registerAskRoutes(app: Application, deps: Deps) {
         ids = await withUser(deps.db, who, async (q) => {
           let conversationId = input.conversation_id;
           if (!conversationId || !(await store.ownsConversation(q, conversationId, who.email))) {
-            conversationId = await store.createConversation(q, who.email, lib.id, input.question);
+            conversationId = await store.createConversation(q, who.email, libraryIds, input.question);
           }
           const saved = await store.saveTurn(q, {
             conversation_id: conversationId,

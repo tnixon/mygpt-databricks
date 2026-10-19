@@ -5,6 +5,12 @@ import type { LibraryInput, Visibility } from './db/store';
 export const MODEL_ALIASES = ['sonnet', 'llama', 'gptoss'] as const;
 export type ModelAlias = (typeof MODEL_ALIASES)[number];
 
+// Supervisor routes: auto (it decides) or a forced documents / Genie / tools route.
+export const ROUTES = ['auto', 'docs', 'genie', 'tools'] as const;
+export type Route = (typeof ROUTES)[number];
+/** Libraries one question may search (= the Supervisor's MAX_LIBRARIES). */
+export const MAX_ASK_LIBRARIES = 8;
+
 // MyGPT's document_languages (models.py). 'unknown' = mixed / unlisted languages: multilingual
 // reranker, no translation, 'simple' text search.
 export const LANGUAGES = [
@@ -69,7 +75,9 @@ export interface AskInput {
   model: ModelAlias;
   k: number;
   focus: { documents: string[]; section?: string };
-  library_id?: string;
+  route: Route;
+  /** the libraries the Supervisor may search (empty = the default library) */
+  library_ids: string[];
   conversation_id?: string;
 }
 
@@ -85,8 +93,12 @@ export function parseAskInput(body: unknown): Result<AskInput> {
     documents: Array.isArray(f.documents) ? f.documents.map(String).slice(0, 50) : [],
     section: typeof f.section === 'string' && f.section !== 'all' ? f.section : undefined,
   };
-  if (b.library_id !== undefined && b.library_id !== null && !isUuid(b.library_id)) {
-    return { ok: false, error: 'invalid library_id' };
+  const route: Route = ROUTES.includes(b.route as Route) ? (b.route as Route) : 'auto';
+  const rawIds = b.library_ids ?? [];
+  if (!Array.isArray(rawIds) || !rawIds.every(isUuid)) return { ok: false, error: 'library_ids must be library ids' };
+  const library_ids = [...new Set(rawIds)];
+  if (library_ids.length > MAX_ASK_LIBRARIES) {
+    return { ok: false, error: `at most ${MAX_ASK_LIBRARIES} libraries per question` };
   }
   if (b.conversation_id !== undefined && b.conversation_id !== null && !isUuid(b.conversation_id)) {
     return { ok: false, error: 'invalid conversation_id' };
@@ -94,8 +106,7 @@ export function parseAskInput(body: unknown): Result<AskInput> {
   return {
     ok: true,
     value: {
-      question, model, k, focus,
-      library_id: (b.library_id as string | undefined) ?? undefined,
+      question, model, k, focus, route, library_ids,
       conversation_id: (b.conversation_id as string | undefined) ?? undefined,
     },
   };

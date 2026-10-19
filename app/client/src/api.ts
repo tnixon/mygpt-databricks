@@ -12,12 +12,24 @@ export function modelLabel(alias?: string | null): string | undefined {
   return MODELS.find((m) => m.alias === alias)?.label ?? alias ?? undefined;
 }
 
+/** Supervisor routes: Auto lets it decide; the others force one. */
+export const ROUTES = [
+  { value: 'auto', label: 'Auto route' },
+  { value: 'docs', label: 'Documents' },
+  { value: 'genie', label: 'Structured data' },
+  { value: 'tools', label: 'Tools (PDB, PubMed)' },
+] as const;
+
+export type Route = (typeof ROUTES)[number]['value'];
+
 export const LANGUAGES = [
   'english', 'french', 'spanish', 'portuguese', 'german', 'italian', 'dutch', 'arabic', 'hindi', 'hungarian',
   'unknown',
 ] as const;
 
 export interface Source {
+  library_id?: string | null;
+  library_name?: string | null;
   source_name?: string | null;
   section?: string | null;
   page?: number | null;
@@ -76,15 +88,61 @@ export interface SectionOption {
   section_count: number;
 }
 
-export interface AskResponse {
+/** One library the Supervisor searched, with its own RAG scores. Its sources are
+ *  sources[first_source - 1 … + n_sources] (citation numbers are global). */
+export interface LibrarySearched {
+  library_id: string | null;
+  name: string | null;
+  first_source: number;
+  n_sources: number;
+  qrs?: number | null;
+  ars?: number | null;
+  hi_eq?: number | null;
+  hi_rf?: number | null;
+  retrieve_error?: string | null;
+  documents_language?: string | null;
+  translated_query?: string | null;
+  translated_answer?: string | null;
+}
+
+export interface GenieResult {
+  status?: string;
+  text?: string;
+  sql?: string | null;
+  description?: string | null;
+  columns?: string[];
+  rows?: unknown[][];
+  row_count?: number;
+}
+
+export interface ToolCall {
+  name: string;
+  ok: boolean;
+  latency_ms?: number;
+}
+
+/** answer: the scores describe the answer; per_library: see libraries_searched;
+ *  documents_part: the answer also drew on Genie / tools. */
+export type ScoresScope = 'answer' | 'per_library' | 'documents_part' | null;
+
+/** What the Supervisor did for one answer (also restored from history's custom_outputs). */
+export interface AgentTrace {
+  route?: string[];
+  scores_scope?: ScoresScope;
+  libraries_searched?: LibrarySearched[];
+  genie?: GenieResult | null;
+  tool_calls?: ToolCall[];
+}
+
+export interface AskResponse extends AgentTrace {
   answer: string;
   sources: Source[];
-  qrs: number;
+  qrs: number | null;
   ars: number | null;
   hi_eq: number | null;
   hi_rf: number | null;
   model: string;
-  library_id: string;
+  library_ids: string[];
   /** Phase 6: the question as searched / the answer as scored, in the documents' language */
   documents_language?: string;
   translated_query?: string | null;
@@ -99,6 +157,7 @@ export interface ConversationSummary {
   id: string;
   owner_email: string;
   library_id: string | null;
+  library_ids: string[] | null;
   library_name: string | null;
   title: string;
   last_at: string;
@@ -120,6 +179,7 @@ export interface QaTurn {
   hi_eq: number | null;
   hi_rf: number | null;
   sources: Source[];
+  custom_outputs: AgentTrace | null;
   my_rating: number | null;
   my_comment: string | null;
 }
@@ -166,7 +226,7 @@ export const api = {
   sections: (libraryId?: string) =>
     call<{ sections: SectionOption[] }>(`/api/sections${libraryId ? `?library_id=${libraryId}` : ''}`),
   ask: (body: {
-    question: string; model: ModelAlias; library_id?: string; conversation_id?: string;
+    question: string; model: ModelAlias; library_ids: string[]; route: Route; conversation_id?: string;
     focus?: { section?: string };
   }) => call<AskResponse>('/api/ask', json('POST', body)),
   conversations: () => call<{ conversations: ConversationSummary[] }>('/api/conversations'),

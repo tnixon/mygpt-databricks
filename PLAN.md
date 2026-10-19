@@ -428,9 +428,24 @@ Hindi PDFs, and step 6 on `native_questions.csv`. The build ran without the nati
     and QRS/ARS/HI pass through verbatim.
   - Structured questions go to Genie, and domain tools are UC functions, both via **managed
     MCP**.
-- **The agents still never touch Lakebase.** Library write tools (create library, add
+- **The agents still never touch Lakebase.** ~~Library write tools (create library, add
   document from URL, re-ingest) are returned as *proposed actions*. The app runs them under
-  RLS after the user confirms.
+  RLS after the user confirms.~~ Superseded 2026-10-18, see below.
+- **App integration (2026-10-18).** The app's grounded path now calls `mygpt-supervisor`, not
+  `mygpt-rag-agent`.
+  - **No library writes from the agents.** Library management stays user-driven on the
+    Libraries page; `propose_library_action` and `list_my_libraries` were removed.
+  - **Library selection instead.** The user picks a *set* of libraries in chat
+    (`custom_inputs.libraries`; upload libraries carry their Lakebase hits pre-retrieved).
+    For each question the Supervisor chooses which ones to search, with one RAG call per
+    library, in parallel.
+  - **Merging.** One library → verbatim answer and scores. Several → the LLM merges the
+    answers, citations are renumbered globally, and each library keeps its own QRS/ARS/HI
+    (`scores_scope = per_library`, `libraries_searched`).
+  - **Multi-library conversations stay owner-only** (`conversations.library_id` is NULL;
+    migration `005_supervisor`), so private-library content can't reach a shared history.
+  - The app sends recent turns as history, and users can override the route (Auto /
+    Documents / Structured data / Tools).
 - **Azure AI Foundry** is a config-driven served entity on `mygpt-chat`. It stays off until
   St. Jude provides the deployment.
 - **Genie seed** = `kinome` + `kinase_papers` (from the kinase_literature CSVs) + a

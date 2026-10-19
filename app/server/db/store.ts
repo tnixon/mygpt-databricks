@@ -50,6 +50,7 @@ export interface IngestRun {
 
 export interface SourceRow {
   rank: number;
+  library_id?: string | null;
   source_name?: string | null;
   corpus?: string | null;
   section?: string | null;
@@ -64,7 +65,10 @@ export interface SourceRow {
 export interface ConversationSummary {
   id: string;
   owner_email: string;
+  /** set only for single-library conversations (it drives share_history) */
   library_id: string | null;
+  /** every library the conversation searches */
+  library_ids: string[] | null;
   library_name: string | null;
   title: string;
   created_at: string;
@@ -89,6 +93,8 @@ export interface QaTurn {
   hi_rf: number | null;
   model_endpoint: string | null;
   trace_id: string | null;
+  /** the Supervisor's custom_outputs (route, libraries_searched, genie, tool_calls, …) */
+  custom_outputs: unknown;
   sources: SourceRow[];
   my_rating: number | null;
   my_comment: string | null;
@@ -332,12 +338,27 @@ export class Store {
 
   // ------------------------------------------------------------------ conversations
 
-  async createConversation(q: Queryable, owner: string, libraryId: string | null, title: string): Promise<string> {
+  /** library_id (which drives share_history) is set only when the conversation searches ONE
+   *  library: a multi-library conversation stays owner-only (migration 005). */
+  async createConversation(q: Queryable, owner: string, libraryIds: string[], title: string): Promise<string> {
     const r = await q.query<{ id: string }>(
-      `INSERT INTO ${this.schema}.conversations (owner_email, library_id, title) VALUES ($1, $2, $3) RETURNING id`,
-      [owner, libraryId, title.slice(0, 200)],
+      `INSERT INTO ${this.schema}.conversations (owner_email, library_id, library_ids, title)
+       VALUES ($1, $2, $3, $4) RETURNING id`,
+      [owner, libraryIds.length === 1 ? libraryIds[0] : null, libraryIds, title.slice(0, 200)],
     );
     return r.rows[0].id;
+  }
+
+  /** The last `limit` answered turns of a conversation, oldest first (multi-turn context). */
+  async recentTurns(q: Queryable, conversationId: string, limit: number): Promise<{ question: string; answer: string }[]> {
+    const r = await q.query<{ question: string; answer: string }>(
+      `SELECT qq.question_text AS question, a.answer_text AS answer
+       FROM ${this.schema}.questions qq JOIN ${this.schema}.answers a ON a.question_id = qq.id
+       WHERE qq.conversation_id = $1 AND a.answer_text <> ''
+       ORDER BY qq.created_at DESC LIMIT $2`,
+      [conversationId, limit],
+    );
+    return r.rows.reverse();
   }
 
   /** True if the conversation exists and belongs to `owner` (only owners append turns). */
@@ -384,17 +405,17 @@ export class Store {
     );
     const answerId = ar.rows[0].id;
     if (turn.sources.length > 0) {
-      // one multi-row insert: 11 columns per source
+      // one multi-row insert: 12 columns per source
       const values: unknown[] = [];
       const tuples = turn.sources.map((src, i) => {
-        values.push(answerId, src.rank ?? i + 1, src.source_name ?? null, src.corpus ?? null, src.section ?? null,
-          src.page ?? null, src.snippet ?? null, src.vector_score ?? null, src.bm25_score ?? null,
+        values.push(answerId, src.rank ?? i + 1, src.library_id ?? null, src.source_name ?? null, src.corpus ?? null,
+          src.section ?? null, src.page ?? null, src.snippet ?? null, src.vector_score ?? null, src.bm25_score ?? null,
           src.rerank_score ?? null, src.nli ?? null);
-        const b = i * 11;
-        return `(${Array.from({ length: 11 }, (_, j) => `$${b + j + 1}`).join(', ')})`;
+        const b = i * 12;
+        return `(${Array.from({ length: 12 }, (_, j) => `$${b + j + 1}`).join(', ')})`;
       });
       await q.query(
-        `INSERT INTO ${s}.sources (answer_id, rank, source_name, corpus, section, page, snippet,
+        `INSERT INTO ${s}.sources (answer_id, rank, library_id, source_name, corpus, section, page, snippet,
            vector_score, bm25_score, rerank_score, nli) VALUES ${tuples.join(', ')}`,
         values,
       );
@@ -406,8 +427,8 @@ export class Store {
   async listConversations(q: Queryable, me: string, libraryId?: string): Promise<ConversationSummary[]> {
     const s = this.schema;
     const r = await q.query<ConversationSummary>(
-      `SELECT c.id, c.owner_email, c.library_id, l.name AS library_name, c.title, c.created_at, c.last_at,
-              (SELECT count(*)::int FROM ${s}.questions qq WHERE qq.conversation_id = c.id) AS n_questions,
+      `SELECT c.id, c.owner_email, c.library_id, c.library_ids, l.name AS library_name, c.title, c.created_at,
+              c.last_at, (SELECT count(*)::int FROM ${s}.questions qq WHERE qq.conversation_id = c.id) AS n_questions,
               (c.owner_email <> $1) AS shared
        FROM ${s}.conversations c
        LEFT JOIN ${s}.libraries l ON l.id = c.library_id
@@ -426,8 +447,8 @@ export class Store {
   ): Promise<{ conversation: ConversationSummary; turns: QaTurn[] } | null> {
     const s = this.schema;
     const cr = await q.query<ConversationSummary>(
-      `SELECT c.id, c.owner_email, c.library_id, l.name AS library_name, c.title, c.created_at, c.last_at,
-              (SELECT count(*)::int FROM ${s}.questions qq WHERE qq.conversation_id = c.id) AS n_questions,
+      `SELECT c.id, c.owner_email, c.library_id, c.library_ids, l.name AS library_name, c.title, c.created_at,
+              c.last_at, (SELECT count(*)::int FROM ${s}.questions qq WHERE qq.conversation_id = c.id) AS n_questions,
               (c.owner_email <> $1) AS shared
        FROM ${s}.conversations c LEFT JOIN ${s}.libraries l ON l.id = c.library_id
        WHERE c.id = $2`,
@@ -439,9 +460,9 @@ export class Store {
       `SELECT qq.id AS question_id, qq.question_text, qq.model, qq.focus, qq.qrs, qq.translated_question_text,
               qq.created_at AS asked_at,
               a.id AS answer_id, a.answer_text, a.translated_answer_text, a.ars, a.hi_eq, a.hi_rf, a.model_endpoint,
-              a.trace_id,
+              a.trace_id, a.custom_outputs,
               coalesce((SELECT json_agg(json_build_object(
-                         'rank', so.rank, 'source_name', so.source_name, 'corpus', so.corpus, 'section', so.section,
+                         'rank', so.rank, 'library_id', so.library_id, 'source_name', so.source_name, 'corpus', so.corpus, 'section', so.section,
                          'page', so.page, 'snippet', so.snippet, 'vector_score', so.vector_score,
                          'bm25_score', so.bm25_score, 'rerank_score', so.rerank_score, 'nli', so.nli)
                          ORDER BY so.rank)

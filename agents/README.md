@@ -10,7 +10,7 @@ The **Supervisor** agent (Mosaic AI Agent Framework) that routes each query to t
 | `rag_agent/` | `mygpt-rag-agent` | (translate) → retrieve → rerank (qnli EN / mmarco multilingual) → QRS → generate → NLI (EN) → ARS (stemmed answer BM25) / HI | `mygpt_deploy_agent` |
 | `tools/` | `structural_biology.mygpt_tools.*` | Domain tools as UC functions, served by managed MCP: PubMed (ids, summaries), RCSB PDB (by gene, full text, details), governed corpora | `mygpt_deploy_tools` |
 | `genie/` | Genie space "MyGPT structured data" | Kinome, kinase papers, document catalogue | `mygpt_deploy_genie` |
-| `supervisor/` | `mygpt-supervisor` | Tool-calling router over all of the above; library writes are *proposed*, the app executes them | `mygpt_deploy_supervisor` |
+| `supervisor/` | `mygpt-supervisor` | The app's backend: a tool-calling router over all of the above. It picks which of the user's selected libraries to search (one RAG call each) and merges them; it never changes libraries | `mygpt_deploy_supervisor` |
 
 Tests: `make eval-test` (no workspace). Live checks: `agents/gateway/smoke_test.py [--task chat]`,
 `agents/supervisor/smoke_test.py`. Design and deploy order: `PLAN.md` § Phase 5.

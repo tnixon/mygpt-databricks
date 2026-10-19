@@ -18,17 +18,17 @@ Most model-serving, gateway and Genie objects are not bundle resources. A platfo
 ## Required components and services (checklist)
 
 Before you start, confirm that the target workspace has every capability below. The **Step**
-column points to the deployment step that first needs it. Steps 12–13 are optional.
+column points to the deployment step that first needs it. Step 13 is optional.
 
 > **⚠️ Preview / Beta features to enable first.** A workspace admin enables these on the
 > workspace **Previews** page (Settings → Previews), unless noted otherwise:
 > - **File type** (Beta). **Required.** The ETL's `FILE EXTERNAL` / `FILE MANAGED` columns depend on it
 >   (`etl/sql/01_landing_documents.sql`). Needs Databricks SQL / DBR 18 LTS or later.
-> - **Managed MCP Servers** (Beta). Step 12 only. The Supervisor calls the UC-functions and
+> - **Managed MCP Servers** (Beta). **Required** (step 11). The Supervisor calls the UC-functions and
 >   Genie MCP endpoints (`/api/2.0/mcp/functions/…`, `/api/2.0/mcp/genie/…`).
 > - **MLflow production monitoring** (Beta). Step 13 only. Registered scorers sample live
 >   traces (`eval/monitor.py`).
-> - **Metastore-level UC HTTP connections** (Public Preview). Step 12 only. `rcsb_search`,
+> - **Metastore-level UC HTTP connections** (Public Preview). **Required** (step 11). `rcsb_search`,
 >   `rcsb_data` and `ncbi_eutils` are created at metastore level
 >   (`agents/tools/sql/01_connections.sql`). The SQL `http_request()` function the tools use is
 >   **deprecated** but still works.
@@ -70,17 +70,17 @@ That's why the index points at `mygpt-bge-m3` directly, not `mygpt-embeddings`.
 | ✓ | Capability | Used for | Step | Status |
 |---|---|---|---|---|
 | ☐ | **GPU** Model Serving (GPU_SMALL, always-on) | `mygpt-bge-m3`. GPU capacity/quota must exist in the region | 3 | GA |
-| ☐ | CPU custom-model serving + Mosaic AI Agent Framework (`agents.deploy`, `ResponsesAgent`) | `mygpt-rag-agent`, `mygpt-supervisor` | 10, 12 | GA |
-| ☐ | Foundation Model API pay-per-token: `databricks-claude-sonnet-5`, `databricks-llama-4-maverick`, `databricks-gpt-oss-120b`, `databricks-gemma-3-12b` | Chat, translation, app direct chat | 5, 10, 11 | GA. Availability varies by cloud/region, so check each one in the Serving UI |
+| ☐ | CPU custom-model serving + Mosaic AI Agent Framework (`agents.deploy`, `ResponsesAgent`) | `mygpt-rag-agent`, `mygpt-supervisor` | 10, 11 | GA |
+| ☐ | Foundation Model API pay-per-token: `databricks-claude-sonnet-5`, `databricks-llama-4-maverick`, `databricks-gpt-oss-120b`, `databricks-gemma-3-12b` | Chat, translation, app direct chat | 5, 10, 12 | GA. Availability varies by cloud/region, so check each one in the Serving UI |
 | ☐ | AI Gateway on serving endpoints: external models (`databricks-model-serving` provider), usage tracking, inference tables, rate limits, fallback | `mygpt-embeddings`, `mygpt-chat`, `mygpt-translate` | 5 | GA (Unity Gateway GA since 2026-08-04) |
 | ☐ | *(optional)* Azure AI Foundry deployment (OpenAI provider) | Fallback served entity on `mygpt-chat` | 5 | n/a |
 
 ### Application and state
 | ✓ | Capability | Used for | Step | Status |
 |---|---|---|---|---|
-| ☐ | Databricks Apps | `st-jude-mygpt` | 11 | GA |
-| ☐ | Apps on-behalf-of-user auth (`user_api_scopes: serving.serving-endpoints`) | The app calls serving endpoints as the signed-in user | 11 | GA. ⚠️ the `user_api_scopes` field is still labelled Public Preview |
-| ☐ | Lakebase (autoscaling projects, PG 17) with the `vector` (pgvector) extension | App state, upload-library embeddings | 2, 11 | GA (Azure since 2026-03-02) |
+| ☐ | Databricks Apps | `st-jude-mygpt` | 12 | GA |
+| ☐ | Apps on-behalf-of-user auth (`user_api_scopes: serving.serving-endpoints`) | The app calls serving endpoints as the signed-in user | 12 | GA. ⚠️ the `user_api_scopes` field is still labelled Public Preview |
+| ☐ | Lakebase (autoscaling projects, PG 17) with the `vector` (pgvector) extension | App state, upload-library embeddings | 2, 12 | GA (Azure since 2026-03-02) |
 
 ### MLflow and evaluation
 | ✓ | Capability | Used for | Step | Status |
@@ -90,7 +90,7 @@ That's why the index points at `mygpt-bge-m3` directly, not `mygpt-embeddings`.
 | ☐ | MLflow GenAI evaluation + UC eval datasets | `mygpt_eval*` jobs | 13 | GA |
 | ☐ | MLflow **production monitoring** (registered scorers) | `mygpt_eval_monitor` | 13 | ⚠️ **Beta** |
 
-### Optional: Supervisor, tools and Genie (step 12)
+### Supervisor, tools and Genie (step 11)
 | ✓ | Capability | Used for | Status |
 |---|---|---|---|
 | ☐ | UC HTTP connections (metastore level) + `CREATE CONNECTION` privilege | `rcsb_search`, `rcsb_data`, `ncbi_eutils` | ⚠️ **Public Preview** (schema-level connections are GA) |
@@ -150,8 +150,8 @@ Run every platform-bundle command from the **repo root**, and every app-bundle c
 | 8 | Create the Vector Search endpoint + index | manual (one-time) | VS endpoint `mygpt-vs`, index `doc_chunks_corpus_index` |
 | 9 | Second ETL run | platform `run mygpt_etl` | Index synced and row-count checked |
 | 10 | Deploy the RAG agent | platform `run mygpt_deploy_agent` | UC model `mygpt_rag_agent`, endpoint `mygpt-rag-agent` |
-| 11 | Deploy the app | app `bundle deploy` + `bundle run app` | App `st-jude-mygpt`; Lakebase schema `mygpt` on first start |
-| 12 | *(optional)* Supervisor, tools, Genie | platform `run mygpt_deploy_tools`, `…_genie`, `…_supervisor` | UC connections + functions, Genie space, endpoint `mygpt-supervisor` |
+| 11 | Supervisor, tools, Genie | platform `run mygpt_deploy_tools`, `…_genie`, `…_supervisor` | UC connections + functions, Genie space, endpoint `mygpt-supervisor` |
+| 12 | Deploy the app | app `bundle deploy` + `bundle run app` | App `st-jude-mygpt`; Lakebase schema `mygpt` on first start |
 | 13 | *(optional)* Evaluation + monitoring | `make eval-private` + platform `run mygpt_eval_*` | UC eval datasets, eval runs, monitoring scorers |
 
 ---
@@ -200,7 +200,7 @@ databricks bundle deploy   -p $P --var warehouse_id=$WH
 | Jobs (defined, not run) | `mygpt_etl`, `mygpt_upload_ingest`, `mygpt_deploy_embedding`, `mygpt_deploy_gateway`, `mygpt_deploy_chat_gateway`, `mygpt_deploy_translate_gateway`, `mygpt_deploy_agent`, `mygpt_deploy_tools`, `mygpt_deploy_genie`, `mygpt_deploy_supervisor`, `mygpt_eval_build_datasets`, `mygpt_eval`, `mygpt_eval_reference`, `mygpt_eval_monitor` |
 | Workspace files | The repo (`etl/`, `agents/`, `eval/`, `dashboards/`, eval CSVs) synced to the bundle's `${workspace.file_path}` |
 
-**Record for step 11:**
+**Record for step 12:**
 ```bash
 databricks bundle summary -p $P                                          # jobs.mygpt_upload_ingest → job id
 databricks experiments get-by-name /Shared/mygpt/mygpt-rag-agent -p $P   # experiment_id
@@ -360,7 +360,29 @@ databricks bundle run mygpt_deploy_agent -p $P --var warehouse_id=$WH
 `custom_outputs` scores (QRS / ARS / HI) and sources. The first calls after a deploy can take
 30+ s while the rerankers download.
 
-## 11. Deploy the app
+## 11. Supervisor, domain tools and Genie
+**Bundle:** platform (three jobs, in this order)
+
+The app's grounded chat runs through the Supervisor (`mygpt-supervisor`), which routes each
+question to the selected libraries' documents (via `mygpt-rag-agent`), Genie or the tools, so
+deploy it before the app.
+```bash
+databricks bundle run mygpt_deploy_tools      -p $P --var warehouse_id=$WH
+databricks bundle run mygpt_deploy_genie      -p $P --var warehouse_id=$WH
+databricks bundle run mygpt_deploy_supervisor -p $P --var warehouse_id=$WH
+```
+
+**Creates:**
+| Job | Resources |
+|---|---|
+| `mygpt_deploy_tools` | UC HTTP connections `rcsb_search`, `rcsb_data`, `ncbi_eutils`. Schema `structural_biology.mygpt_tools` with UC functions (PubMed ids/summaries, RCSB PDB search/details, governed corpora), served via managed MCP |
+| `mygpt_deploy_genie` | Genie space **"MyGPT structured data"** over `kinome`, `kinase_papers` and `corpus_documents` (from step 7), on `$WH` |
+| `mygpt_deploy_supervisor` | UC model `structural_biology.mygpt.mygpt_supervisor`. Endpoint **`mygpt-supervisor`** (scale-to-zero), with resources on `mygpt-chat`, `mygpt-rag-agent`, the Genie space, its tables, the tool functions and the connections |
+
+**Verify:** `python agents/supervisor/smoke_test.py --profile $P` (documents, genie and tools routes, and a
+two-library question that should search only the kinase library).
+
+## 12. Deploy the app
 **Bundle:** app (`bundle deploy` + `bundle run app`), run from `app/`.
 
 ```bash
@@ -379,7 +401,7 @@ principal is granted:
 | App resource | Target | Permission | Created in step |
 |---|---|---|---|
 | `serving-endpoint`, `-llama`, `-gptoss` | FMAPI Sonnet / Llama / GPT-OSS | CAN_QUERY | (workspace) |
-| `agent-endpoint` | `mygpt-rag-agent` | CAN_QUERY | 10 |
+| `agent-endpoint` | `mygpt-supervisor` | CAN_QUERY | 11 |
 | `embeddings-endpoint` | `mygpt-embeddings` | CAN_QUERY | 5 |
 | `postgres` | Lakebase `projects/mygpt/branches/production` / `databricks-postgres` | CAN_CONNECT_AND_CREATE | 2 |
 | `uploads-volume` | `structural_biology.mygpt.uploads` | WRITE_VOLUME | 2 |
@@ -388,8 +410,12 @@ principal is granted:
 | `sql-warehouse` | `$WH` | CAN_USE | (prereq) |
 | `experiment` | `/Shared/mygpt/mygpt-rag-agent` | CAN_EDIT | 2 |
 
+The app calls `mygpt-supervisor` **as the signed-in user**, so app users need CAN_QUERY on it
+(Serving UI → `mygpt-supervisor` → Permissions, e.g. for the users group). They need nothing on
+`mygpt-rag-agent`, Genie or the tools: the Supervisor calls those with its own credentials.
+
 On first start, the app's service principal creates and owns the Lakebase schema `mygpt` and
-runs migrations `001_init` → `004_multilingual`. These cover libraries, upload chunks with
+runs migrations `001_init` → `005_supervisor`. These cover libraries, upload chunks with
 pgvector, RLS, history and feedback, and seed the corpus libraries.
 
 **Verify:** the app logs show `[lakebase] schema mygpt ready`. If they show
@@ -400,26 +426,6 @@ ask a question against a governed library.
 When a user uploads files to a library, the app itself triggers **`mygpt_upload_ingest`**, which
 parses, chunks and embeds them into Lakebase `mygpt.upload_chunks`. That job is never run by
 hand.
-
-## 12. *(Optional)* Supervisor, domain tools and Genie
-**Bundle:** platform (three jobs, in this order)
-
-The current app doesn't call the Supervisor. Deploy it to evaluate multi-agent routing, or for
-API consumers.
-```bash
-databricks bundle run mygpt_deploy_tools      -p $P --var warehouse_id=$WH
-databricks bundle run mygpt_deploy_genie      -p $P --var warehouse_id=$WH
-databricks bundle run mygpt_deploy_supervisor -p $P --var warehouse_id=$WH
-```
-
-**Creates:**
-| Job | Resources |
-|---|---|
-| `mygpt_deploy_tools` | UC HTTP connections `rcsb_search`, `rcsb_data`, `ncbi_eutils`. Schema `structural_biology.mygpt_tools` with UC functions (PubMed ids/summaries, RCSB PDB search/details, governed corpora), served via managed MCP |
-| `mygpt_deploy_genie` | Genie space **"MyGPT structured data"** over `kinome`, `kinase_papers` and `corpus_documents` (from step 7), on `$WH` |
-| `mygpt_deploy_supervisor` | UC model `structural_biology.mygpt.mygpt_supervisor`. Endpoint **`mygpt-supervisor`** (scale-to-zero), with resources on `mygpt-chat`, `mygpt-rag-agent`, the Genie space, its tables, the tool functions and the connections |
-
-**Verify:** `python agents/supervisor/smoke_test.py --profile $P` (documents, genie, tools and libraries routes).
 
 ## 13. *(Optional)* Evaluation and production monitoring
 **Bundle:** platform

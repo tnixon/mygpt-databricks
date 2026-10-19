@@ -43,9 +43,9 @@ FUNCTION_TOOLS = {"tools": [
 class FakeTransport:
     """Scripted LLM turns; records every RAG / MCP call."""
 
-    def __init__(self, llm_turns: list, rag: dict | None = None, mcp: dict | None = None):
+    def __init__(self, llm_turns: list, rag=None, mcp: dict | None = None):
         self.llm_turns = list(llm_turns)
-        self.rag_resp = rag or rag_response()
+        self.rag_resp = rag or rag_response()  # a response, or body -> response
         self.mcp_results = mcp or {}
         self.chats: list[dict] = []
         self.rag_calls: list[dict] = []
@@ -60,7 +60,7 @@ class FakeTransport:
 
     def rag(self, body):
         self.rag_calls.append(body)
-        return self.rag_resp
+        return self.rag_resp(body) if callable(self.rag_resp) else self.rag_resp
 
     def mcp(self, path, method, params=None):
         self.mcp_calls.append((path, method, params))
@@ -194,47 +194,155 @@ def test_upload_library_sources_are_forwarded_and_corpus_choice_hidden():
     assert "corpus" not in spec["function"]["parameters"]["properties"]
 
 
-# --------------------------------------------------------------------------- actions
-LIBS = [{"id": "11", "name": "My FR policies", "kind": "upload", "visibility": "private"},
-        {"id": "1", "name": "All governed documents", "kind": "corpus", "visibility": "public"}]
-
-
-def test_actions_are_proposed_never_executed():
-    t = FakeTransport([
-        {"tool_calls": [tool_call("propose_library_action", {"action": "create_library", "library_name": "Kinases"}, "c1"),
-                        tool_call("propose_library_action", {"action": "add_document_from_url",
-                                                             "url": "https://example.org/p.pdf"}, "c2")]},
-        {"content": "I've proposed creating Kinases and adding the PDF; please confirm."},
-    ])
-    resp = ask(t, question="make a Kinases library with https://example.org/p.pdf", libraries=LIBS, allow_actions=True)
-    acts = resp.custom_outputs["actions"]
-    assert [a["action"] for a in acts] == ["create_library", "add_document_from_url"]
-    assert acts[0]["visibility"] == "private" and acts[1]["library_id"] is None  # = the library proposed above
-    assert not t.rag_calls and all(m[1] == "tools/list" for m in t.mcp_calls)  # nothing executed
-    assert resp.custom_outputs["route"] == ["libraries"]
-
-
-def test_action_validation_errors_reach_the_llm():
-    t = FakeTransport([
-        {"tool_calls": [tool_call("propose_library_action", {"action": "reingest", "library_id": "1"}, "c1"),
-                        tool_call("propose_library_action", {"action": "drop_table"}, "c2"),
-                        {"id": "c3", "type": "function",
-                         "function": {"name": "propose_library_action", "arguments": "{not json"}}]},
-        {"content": "I can't do that."},
-    ])
-    resp = ask(t, libraries=LIBS, allow_actions=True)
-    assert resp.custom_outputs["actions"] == []
-    errors = [json.loads(m["content"])["error"] for m in t.chats[1]["messages"] if m["role"] == "tool"]
-    assert "upload libraries" in errors[0] and "unknown action" in errors[1] and "malformed" in errors[2]
-    assert [c["ok"] for c in resp.custom_outputs["tool_calls"]] == [False, False, False]
-
-
-def test_action_and_library_tools_need_app_opt_in():
+def test_only_read_tools_are_offered():
     t = FakeTransport([{"content": "ok"}])
-    ask(t)
+    ask(t, libraries=LIBS)
     names = {s["function"]["name"] for s in t.chats[0]["tools"]}
     assert "propose_library_action" not in names and "list_my_libraries" not in names
     assert {"search_documents", "search_pdb_by_gene", "list_corpora"} <= names
+    assert "actions" not in ask(FakeTransport([{"content": "ok"}])).custom_outputs
+
+
+# --------------------------------------------------------------------------- libraries
+LIBS = [
+    {"id": "lib-kin", "name": "BlueSky kinase literature", "kind": "corpus", "corpus": "kinase_literature",
+     "dataset": "kinase_literature", "documents_language": "english", "description": "BlueSky kinase papers."},
+    {"id": "lib-bio", "name": "Biomedical seed (BioASQ)", "kind": "corpus", "corpus": "biomed",
+     "dataset": "biomed", "documents_language": "english"},
+    {"id": "lib-up", "name": "My notes", "kind": "upload", "dataset": "mygpt", "documents_language": "english",
+     "sources": [{"chunk_id": "u1", "chunk_text": "x", "similarity": 0.8}]},
+]
+
+
+def rag_by_library(body):
+    """Per-library RAG responses: two sources each, keyed by corpus (upload = provided)."""
+    ci = body["custom_inputs"]
+    name = ci.get("corpus") or "upload"
+    scores = {"kinase_literature": 61, "biomed": 40, "upload": 70}[name]
+    resp = rag_response(f"{name} says A [1] and B [2], see [1, 2].", corpus=ci.get("corpus"))
+    resp["custom_outputs"].update({"qrs": scores, "trace_id": f"tr-{name}", "sources": [
+        {"source_name": f"{name}-a.pdf", "chunk_id": "a", "context": "ctx"},
+        {"source_name": f"{name}-b.pdf", "chunk_id": "b", "context": "ctx"}]})
+    return resp
+
+
+def test_system_prompt_lists_the_selected_libraries_with_keys():
+    t = FakeTransport([{"content": "ok"}])
+    ask(t, libraries=LIBS)
+    system = t.chats[0]["messages"][0]["content"]
+    assert "L1: 'BlueSky kinase literature' (governed collection, english) - BlueSky kinase papers." in system
+    assert "L3: 'My notes' (the user's uploaded documents, english)" in system
+    spec = next(s for s in t.chats[0]["tools"] if s["function"]["name"] == "search_documents")
+    props = spec["function"]["parameters"]["properties"]
+    assert props["libraries"]["items"]["enum"] == ["L1", "L2", "L3"] and "corpus" not in props
+
+
+def test_one_chosen_library_is_verbatim_with_its_scores():
+    t = FakeTransport([{"tool_calls": [tool_call("search_documents", {"query": "q", "libraries": ["L1"]})]}], rag=rag_by_library)
+    resp = ask(t, libraries=LIBS, k=4)
+    co = resp.custom_outputs
+    assert len(t.chats) == 1 and len(t.rag_calls) == 1
+    rci = t.rag_calls[0]["custom_inputs"]
+    assert rci["corpus"] == "kinase_literature" and rci["dataset"] == "kinase_literature" and rci["k"] == 4
+    assert answer_text(resp) == "kinase_literature says A [1] and B [2], see [1, 2]."
+    assert co["scores_scope"] == "answer" and co["qrs"] == 61 and co["trace_id"] == "tr-kinase_literature"
+    assert [s["library_id"] for s in co["sources"]] == ["lib-kin", "lib-kin"]
+    assert co["libraries_searched"][0]["library_id"] == "lib-kin" and co["libraries_searched"][0]["first_source"] == 1
+
+
+def test_several_libraries_are_merged_with_global_citations():
+    t = FakeTransport([
+        {"tool_calls": [tool_call("search_documents", {"query": "q", "libraries": ["L2", "L3"]}, "c1")]},
+        {"content": "Merged [1] and [3]."},
+    ], rag=rag_by_library)
+    resp = ask(t, libraries=LIBS)
+    co = resp.custom_outputs
+    assert answer_text(resp) == "Merged [1] and [3]." and len(t.chats) == 2
+    # upload library: its pre-retrieved hits are forwarded, no corpus
+    up = next(b["custom_inputs"] for b in t.rag_calls if "sources" in b["custom_inputs"])
+    assert up["sources"] == LIBS[2]["sources"] and "corpus" not in up
+    tool = json.loads(next(m["content"] for m in t.chats[1]["messages"] if m["role"] == "tool"))
+    first, second = tool["results"]
+    assert first["library"] == "Biomedical seed (BioASQ)" and [s["n"] for s in first["sources"]] == [1, 2]
+    assert second["answer"] == "upload says A [3] and B [4], see [3, 4]." and [s["n"] for s in second["sources"]] == [3, 4]
+    assert co["scores_scope"] == "per_library" and co["qrs"] is None
+    assert [(x["library_id"], x["qrs"], x["first_source"]) for x in co["libraries_searched"]] == [
+        ("lib-bio", 40, 1), ("lib-up", 70, 3)]
+    assert [s["source_name"] for s in co["sources"]] == ["biomed-a.pdf", "biomed-b.pdf", "upload-a.pdf", "upload-b.pdf"]
+    assert co["trace_id"] is None or co["trace_id"] == co["supervisor_trace_id"]  # no single RAG trace
+
+
+def test_llm_cannot_pick_libraries_outside_the_set():
+    t = FakeTransport([{"tool_calls": [tool_call("search_documents", {"query": "q", "libraries": ["L9", "L2"]})]}], rag=rag_by_library)
+    ask(t, libraries=LIBS)
+    assert [b["custom_inputs"].get("corpus") for b in t.rag_calls] == ["biomed"]
+
+
+def test_omitted_libraries_search_the_whole_set():
+    t = FakeTransport([{"tool_calls": [tool_call("search_documents", {"query": "q"})]}, {"content": "All."}], rag=rag_by_library)
+    resp = ask(t, libraries=LIBS)
+    assert len(t.rag_calls) == 3 and len(resp.custom_outputs["libraries_searched"]) == 3
+
+
+def test_numbering_continues_across_search_calls():
+    t = FakeTransport([
+        {"tool_calls": [tool_call("search_documents", {"query": "q1", "libraries": ["L1"]}, "c1"),
+                        tool_call("list_corpora", {}, "c2")]},
+        {"tool_calls": [tool_call("search_documents", {"query": "q2", "libraries": ["L2"]}, "c3")]},
+        {"content": "done"},
+    ], rag=rag_by_library)
+    resp = ask(t, libraries=LIBS)
+    co = resp.custom_outputs
+    assert [x["first_source"] for x in co["libraries_searched"]] == [1, 3]
+    last_tool = json.loads([m for m in t.chats[2]["messages"] if m["role"] == "tool"][-1]["content"])
+    assert last_tool["answer"].startswith("biomed says A [3] and B [4]")
+
+
+def test_forced_docs_route_merges_several_libraries():
+    t = FakeTransport([{"content": "Merged."}], rag=rag_by_library)
+    resp = ask(t, route="docs", libraries=LIBS[:2])
+    assert len(t.rag_calls) == 2 and t.chats[0]["tools"] is None
+    assert answer_text(resp) == "Merged." and resp.custom_outputs["scores_scope"] == "per_library"
+
+
+def test_router_down_with_several_libraries_stacks_their_answers():
+    t = FakeTransport([RuntimeError("503")], rag=rag_by_library)
+    resp = ask(t, libraries=LIBS[:2])
+    text = answer_text(resp)
+    assert text.startswith("**BlueSky kinase literature**") and "biomed says A [3]" in text
+
+
+def test_one_failing_library_keeps_the_others():
+    def flaky(body):
+        if body["custom_inputs"].get("corpus") == "biomed":
+            raise RuntimeError("endpoint scaling up")
+        return rag_by_library(body)
+
+    t = FakeTransport([{"tool_calls": [tool_call("search_documents", {"query": "q", "libraries": ["L1", "L2"]})]},
+                       {"content": "Kinase part only [1]."}], rag=flaky)
+    co = ask(t, libraries=LIBS).custom_outputs
+    errors = {x["library_id"]: x["retrieve_error"] for x in co["libraries_searched"]}
+    assert errors["lib-kin"] is None and "scaling up" in errors["lib-bio"]
+    assert co["tool_calls"][0]["ok"] is True and len(co["sources"]) == 2
+
+
+def test_an_empty_library_set_never_widens_to_all_documents():
+    t = FakeTransport([{"content": "Nothing in your libraries matches."}])
+    resp = ask(t, libraries=[])
+    assert not t.rag_calls and "search_documents" not in {s["function"]["name"] for s in t.chats[0]["tools"]}
+    assert "unavailable" in t.chats[0]["messages"][0]["content"]
+    t = FakeTransport([])
+    resp = ask(t, route="docs", libraries=[])
+    assert not t.rag_calls and resp.custom_outputs["tool_calls"][0]["ok"] is False
+
+
+@pytest.mark.parametrize("text,offset,n,expected", [
+    ("A [1], B [2] and [1, 2].", 4, 2, "A [5], B [6] and [5, 6]."),
+    ("A [1] and year [2024].", 2, 3, "A [3] and year [2024]."),
+    ("A [1].", 0, 1, "A [1]."),
+])
+def test_renumber_citations(text, offset, n, expected):
+    assert sa.renumber_citations(text, offset, n) == expected
 
 
 # --------------------------------------------------------------------------- Genie

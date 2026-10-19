@@ -1,10 +1,11 @@
 import { useState } from 'react';
 import { Badge, Button, Input, Spinner } from '@databricks/appkit-ui/react';
 import { ThumbsDown, ThumbsUp } from 'lucide-react';
-import { api, modelLabel, type Rating, type Source } from './api';
+import { api, modelLabel, type AgentTrace, type GenieResult, type LibrarySearched, type Rating, type Source } from './api';
 import { Markdown } from './Markdown';
 
-export interface ChatMessage {
+/** What the Supervisor did (route, per-library scores, Genie, tools) rides along as AgentTrace. */
+export interface ChatMessage extends AgentTrace {
   role: 'user' | 'assistant';
   content: string;
   model?: string | null;
@@ -40,26 +41,12 @@ export function MessageBubble({ msg, streaming }: { msg: ChatMessage; streaming?
                 {modelLabel(msg.model)}
               </Badge>
             )}
-            {typeof msg.qrs === 'number' && (
-              <Badge variant="secondary" className="text-[10px]">
-                QRS {Math.round(msg.qrs)}
+            {(msg.route ?? []).map((r) => (
+              <Badge key={r} variant="outline" className="text-[10px]" title="how MyGPT answered">
+                {ROUTE_LABELS[r] ?? r}
               </Badge>
-            )}
-            {typeof msg.ars === 'number' && (
-              <Badge variant="secondary" className="text-[10px]">
-                ARS {Math.round(msg.ars)}
-              </Badge>
-            )}
-            {typeof msg.hi_eq === 'number' && (
-              <Badge
-                variant={msg.hi_eq >= 50 ? 'destructive' : 'secondary'}
-                className="text-[10px]"
-                title={typeof msg.hi_rf === 'number' ? `Random-forest HI: ${Math.round(msg.hi_rf)}` : undefined}
-              >
-                HI {Math.round(msg.hi_eq)}
-                {typeof msg.hi_rf === 'number' ? ` · RF ${Math.round(msg.hi_rf)}` : ''}
-              </Badge>
-            )}
+            ))}
+            <Scores qrs={msg.qrs} ars={msg.ars} hi_eq={msg.hi_eq} hi_rf={msg.hi_rf} />
             {streaming && <Spinner className="h-3 w-3" />}
           </div>
         )}
@@ -76,13 +63,103 @@ export function MessageBubble({ msg, streaming }: { msg: ChatMessage; streaming?
           <Translations msg={msg} />
         )}
 
+        {!isUser && msg.genie && <GeniePanel genie={msg.genie} />}
+
         {!isUser && msg.sources && msg.sources.length > 0 && (
           <div className="mt-3 border-t border-border pt-2">
-            <div className="mb-1 text-xs font-medium text-muted-foreground">Sources</div>
+            {msg.scores_scope === 'documents_part' && (
+              <div className="mb-1 text-[11px] text-muted-foreground">
+                Trust scores cover the documents part of this answer only.
+              </div>
+            )}
+            {sourceGroups(msg).map((g, gi) => (
+              <div key={gi} className={gi > 0 ? 'mt-2' : ''}>
+                <div className="mb-1 flex flex-wrap items-center gap-2 text-xs font-medium text-muted-foreground">
+                  <span>{g.library ? `Sources · ${g.library.name ?? 'library'}` : 'Sources'}</span>
+                  {g.library && <Scores {...g.library} />}
+                </div>
+                <SourceList sources={g.sources} first={g.first} />
+              </div>
+            ))}
+          </div>
+        )}
+
+        {!isUser && msg.tool_calls && msg.tool_calls.length > 0 && (
+          <details className="mt-2 text-xs text-muted-foreground">
+            <summary className="cursor-pointer">Tools used ({msg.tool_calls.length})</summary>
+            <ul className="mt-1 space-y-0.5">
+              {msg.tool_calls.map((c, i) => (
+                <li key={i}>
+                  {c.name}
+                  {c.ok ? '' : ' · failed'}
+                  {typeof c.latency_ms === 'number' ? ` · ${(c.latency_ms / 1000).toFixed(1)} s` : ''}
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+
+        {!isUser && msg.answer_id && (
+          <Feedback answerId={msg.answer_id} rating={msg.my_rating ?? null} comment={msg.my_comment ?? ''} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+const ROUTE_LABELS: Record<string, string> = {
+  documents: 'Documents',
+  genie: 'Structured data',
+  tools: 'Tools',
+  direct: 'Direct',
+};
+
+/** QRS / ARS / HI badges (each shown only when present). */
+function Scores({ qrs, ars, hi_eq, hi_rf }: { qrs?: number | null; ars?: number | null; hi_eq?: number | null; hi_rf?: number | null }) {
+  return (
+    <>
+      {typeof qrs === 'number' && (
+        <Badge variant="secondary" className="text-[10px]">
+          QRS {Math.round(qrs)}
+        </Badge>
+      )}
+      {typeof ars === 'number' && (
+        <Badge variant="secondary" className="text-[10px]">
+          ARS {Math.round(ars)}
+        </Badge>
+      )}
+      {typeof hi_eq === 'number' && (
+        <Badge
+          variant={hi_eq >= 50 ? 'destructive' : 'secondary'}
+          className="text-[10px]"
+          title={typeof hi_rf === 'number' ? `Random-forest HI: ${Math.round(hi_rf)}` : undefined}
+        >
+          HI {Math.round(hi_eq)}
+          {typeof hi_rf === 'number' ? ` · RF ${Math.round(hi_rf)}` : ''}
+        </Badge>
+      )}
+    </>
+  );
+}
+
+/** Sources split per searched library when several were (citation numbers stay global). */
+function sourceGroups(msg: ChatMessage): { library: LibrarySearched | null; sources: Source[]; first: number }[] {
+  const sources = msg.sources ?? [];
+  const searched = msg.libraries_searched ?? [];
+  if (searched.length <= 1) return [{ library: null, sources, first: 1 }];
+  return searched.map((lib) => ({
+    library: lib,
+    sources: sources.slice(lib.first_source - 1, lib.first_source - 1 + lib.n_sources),
+    first: lib.first_source,
+  }));
+}
+
+function SourceList({ sources, first }: { sources: Source[]; first: number }) {
+  return (
             <ol className="space-y-1">
-              {msg.sources.map((s, i) => (
+              {sources.map((s, i) => (
                 <li key={i} className="flex items-start gap-2 text-xs">
-                  <span className="text-muted-foreground">[{i + 1}]</span>
+                  <span className="text-muted-foreground">[{first + i}]</span>
                   <span className="flex-1 break-words">
                     <span className="font-medium">{s.source_name}</span>
                     {s.page != null ? ` · p${s.page}` : ''}
@@ -105,14 +182,40 @@ export function MessageBubble({ msg, streaming }: { msg: ChatMessage; streaming?
                 </li>
               ))}
             </ol>
-          </div>
-        )}
+  );
+}
 
-        {!isUser && msg.answer_id && (
-          <Feedback answerId={msg.answer_id} rating={msg.my_rating ?? null} comment={msg.my_comment ?? ''} />
-        )}
-      </div>
-    </div>
+const cellText = (v: unknown): string =>
+  v == null ? '—' : typeof v === 'object' ? JSON.stringify(v) : String(v as string | number | boolean);
+
+/** Genie's answer: its text, the SQL it ran and (up to 20 of) the result rows. */
+function GeniePanel({ genie }: { genie: GenieResult }) {
+  const columns = genie.columns ?? [];
+  const rows = (genie.rows ?? []).slice(0, 20);
+  return (
+    <details className="mt-3 border-t border-border pt-2 text-xs">
+      <summary className="cursor-pointer font-medium text-muted-foreground">
+        Structured data{typeof genie.row_count === 'number' ? ` · ${genie.row_count} row${genie.row_count === 1 ? '' : 's'}` : ''}
+        {genie.status && genie.status !== 'COMPLETED' ? ` · ${genie.status.toLowerCase()}` : ''}
+      </summary>
+      {genie.sql && <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded bg-background p-2 font-mono text-[11px]">{genie.sql}</pre>}
+      {columns.length > 0 && rows.length > 0 && (
+        <div className="mt-2 overflow-x-auto">
+          <table className="w-full text-left text-[11px]">
+            <thead>
+              <tr>{columns.map((c) => <th key={c} className="border-b border-border px-1 py-0.5 font-medium">{c}</th>)}</tr>
+            </thead>
+            <tbody>
+              {rows.map((r, i) => (
+                <tr key={i}>
+                  {r.map((v, j) => <td key={j} className="border-b border-border/50 px-1 py-0.5">{cellText(v)}</td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </details>
   );
 }
 
