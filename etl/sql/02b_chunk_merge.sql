@@ -131,9 +131,9 @@ DROP TABLE IF EXISTS _doc_chunks_stage;
 --    bge-m3 endpoint). `section` and (Phase 2) `corpus` are synced so the agent can
 --    filter on them. Adding a synced column requires a new index: Phase 2 created
 --    `doc_chunks_corpus_index` alongside the Phase-1 `doc_chunks_index` (no retrieval
---    downtime; the agent driver points at it via --vs-index-name). Index CREATION is
---    a one-time CLI/API step (below); SYNCING after each run is the job's `sync_index`
---    task, which waits for the sync and checks the indexed row count.
+--    downtime; the agent driver points at it via --vs-index-name). The job's `sync_index`
+--    task (etl/sync_index.py) CREATES the index on the first run (spec as below), then
+--    SYNCS it after each run, waiting for the sync and checking the indexed row count.
 --    If the index is ever deleted + recreated, REDEPLOY THE AGENT afterwards: its SELECT
 --    grant on the index comes from agents.deploy and doesn't carry over to a new index.
 --    And never CREATE OR REPLACE doc_chunks: a new table id breaks the index's sync.

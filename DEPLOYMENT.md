@@ -127,6 +127,7 @@ Each bundle reads its values from `.databricks/bundle/default/variable-overrides
 gitignored file kept per checkout. Install both files from the committed examples, then edit them:
 ```bash
 make config     # copies variable-overrides.example.json -> .databricks/bundle/default/ (root + app/); never overwrites
+# without make: for d in . app; do mkdir -p $d/.databricks/bundle/default && cp -n $d/variable-overrides.example.json $d/.databricks/bundle/default/variable-overrides.json; done
 ```
 | File (committed example) | Bundle | Keys |
 |---|---|---|
@@ -174,68 +175,49 @@ Run every platform-bundle command from the **repo root**, and every app-bundle c
 
 ## Deployment steps at a glance
 
-| # | Step | Bundle / mechanism | `make` | Creates |
-|---|---|---|---|---|
-| 1 | Bootstrap UC, workspace folder, secret scope | manual | `make bootstrap` | schema `mygpt`, volume `docs`, `/Shared/mygpt`, secret scope `mygpt` |
-| 2 | Deploy the platform bundle | platform `bundle deploy` | `make deploy-platform` | Lakebase project, `uploads` + `eval_private` volumes, experiment, dashboard, 14 jobs |
-| 3 | Deploy the embedding model | platform `run mygpt_deploy_embedding` | `make run-deploy_embedding` | UC model `bge_m3`, endpoint `mygpt-bge-m3` |
-| 4 | Store the gateway upstream token | manual | `make secrets` | secret `mygpt/gw_upstream_token` |
-| 5 | Deploy the AI Gateway endpoints | platform `run mygpt_deploy_gateway`, `…_chat_gateway`, `…_translate_gateway` | `make gateways` | `mygpt-embeddings`, `mygpt-chat`, `mygpt-translate` |
-| 6 | Upload the document corpora | `make` / `databricks fs cp` | `make eval-corpus` / `corpus-hi` | PDFs in the `docs` volume |
-| 7 | First ETL run | platform `run mygpt_etl` | `make run-etl` | Document, chunk, config, section and Genie seed tables |
-| 8 | Create the Vector Search endpoint + index | manual (one-time) | `make vs-index` | VS endpoint `mygpt-vs`, index `doc_chunks_corpus_index` |
-| 9 | Second ETL run | platform `run mygpt_etl` | `make run-etl` | Index synced and row-count checked |
-| 10 | Deploy the RAG agent | platform `run mygpt_deploy_agent` | `make run-deploy_agent` | UC model `mygpt_rag_agent`, endpoint `mygpt-rag-agent` |
-| 11 | Supervisor, tools, Genie | platform `run mygpt_deploy_tools`, `…_genie`, `…_supervisor` | `make agents` | UC connections + functions, Genie space, endpoint `mygpt-supervisor` |
-| 12 | Deploy the app | app `bundle deploy` + `bundle run app` | `make sync-ids app-run` | App `st-jude-mygpt`; Lakebase schema `mygpt` on first start |
-| 13 | *(optional)* Evaluation + monitoring | `make eval-private` + platform `run mygpt_eval_*` | `make eval-private run-eval_build_datasets run-eval run-eval_reference run-eval_monitor` | UC eval datasets, eval runs, monitoring scorers |
+**Quickest path:** edit both `variable-overrides.json` files (`warehouse_id` at least) and
+`targets.default.workspace.host` in both `databricks.yml` files. Then run `deploy.sh`, or paste
+its commands one at a time. It's the steps below as plain CLI commands, with `PROFILE` /
+`CATALOG` / `SCHEMA` set at the top. Its step numbers map to this guide: 1–7 → 1–7 (8 and 9 are
+folded into 7), 8 → 10, 9 → 11, 10 → 12, 11 → 13.
 
-**Fast path with `make`.** Every `run-<job>` deploys the platform bundle first, so the code that
-runs is always the code in your checkout. Make runs a target once per invocation, which is why
-the two ETL runs are separate commands:
-```bash
-make config                    # then edit both variable-overrides.json files (warehouse_id, names)
-make bootstrap deploy-platform secrets run-deploy_embedding gateways PROFILE=$P
-make eval-corpus PROFILE=$P [KINASE_PDFS=<dir>]
-make run-etl PROFILE=$P        # sync_index fails on this first run (no index yet); that's expected
-make vs-index PROFILE=$P
-make run-etl PROFILE=$P
-make run-deploy_agent agents sync-ids app-run PROFILE=$P
-```
-`make config-check` (also run by `deploy-app`) catches names that differ between the two bundles.
-`make summary` and `make app-logs` help with verification.
+| # | Step | Bundle / mechanism | Creates |
+|---|---|---|---|
+| 1 | Schema + experiment folder | manual (`deploy.sh` step 1) | schema `mygpt`, `/Shared/mygpt` |
+| 2 | Deploy the platform bundle | platform `bundle deploy` | `docs` / `uploads` / `eval_private` volumes, secret scope `mygpt`, VS endpoint `mygpt-vs`, Lakebase project, experiment, dashboard, 14 jobs |
+| 3 | Deploy the embedding model | platform `run mygpt_deploy_embedding` | UC model `bge_m3`, endpoint `mygpt-bge-m3` |
+| 4 | Store the gateway upstream token | manual | secret `mygpt/gw_upstream_token` |
+| 5 | Deploy the AI Gateway endpoints | platform `run mygpt_deploy_gateway`, `…_chat_gateway`, `…_translate_gateway` | `mygpt-embeddings`, `mygpt-chat`, `mygpt-translate` |
+| 6 | Upload the document corpora | `databricks fs cp` | PDFs in the `docs` volume |
+| 7 | ETL run | platform `run mygpt_etl` | Document, chunk, config, section and Genie seed tables; the Vector Search index (created on the first run) |
+| 8 | *(folded into step 7)* | | |
+| 9 | *(folded into step 7)* | | |
+| 10 | Deploy the RAG agent | platform `run mygpt_deploy_agent` | UC model `mygpt_rag_agent`, endpoint `mygpt-rag-agent` |
+| 11 | Supervisor, tools, Genie | platform `run mygpt_deploy_tools`, `…_genie`, `…_supervisor` | UC connections + functions, Genie space, endpoint `mygpt-supervisor` |
+| 12 | Deploy the app | app `bundle deploy` + `bundle run app` | App `st-jude-mygpt`; Lakebase schema `mygpt` on first start |
+| 13 | *(optional)* Evaluation + monitoring | `fs cp` private ground truths + platform `run mygpt_eval_*` | UC eval datasets, eval runs, monitoring scorers |
 
 ---
 
-## 1. Bootstrap Unity Catalog, workspace folder and secret scope
-**Mechanism:** manual, run once.
+## 1. Schema and experiment folder
+**Mechanism:** manual, run once (`deploy.sh` step 1).
 
-The platform bundle puts volumes in `structural_biology.mygpt` and an experiment under
-`/Shared/mygpt`, so both must exist before step 2. The corpora (step 6) are uploaded to the
-`docs` volume before the ETL runs for the first time. The ETL's landing SQL would create these
-too, but only after it is too late.
-
-Run in the SQL editor (on `$WH`):
-```sql
-CREATE CATALOG IF NOT EXISTS structural_biology;   -- or have an admin create it with a managed location
-CREATE SCHEMA  IF NOT EXISTS structural_biology.mygpt
-  COMMENT 'MyGPT POC — document corpus, indexes, sessions';
-CREATE VOLUME  IF NOT EXISTS structural_biology.mygpt.docs
-  COMMENT 'Raw source documents (FILE EXTERNAL corpus)';
-```
-Then run:
+The catalog must exist: an admin creates it, usually with a managed location
+(`databricks catalogs create structural_biology -p $P`). The schema is created by hand rather
+than by the bundle because, in an existing workspace, it may be owned by someone else. The
+bundle's volumes live in it, and the experiment needs its parent folder:
 ```bash
+databricks schemas create mygpt structural_biology --comment "MyGPT POC — document corpus, indexes, sessions" -p $P
 databricks workspace mkdirs /Shared/mygpt -p $P
-databricks secrets create-scope mygpt -p $P
 ```
+The docs volume, the secret scope and the Vector Search endpoint are bundle resources (step 2).
 
-**Creates:** catalog `structural_biology` (if absent), schema `structural_biology.mygpt`, volume
-`structural_biology.mygpt.docs`, workspace folder `/Shared/mygpt`, secret scope `mygpt`.
+**Creates:** schema `structural_biology.mygpt`, workspace folder `/Shared/mygpt`.
 
 ## 2. Deploy the platform bundle
 **Bundle:** platform (`bundle deploy`)
 
-Run `make config` first and set `warehouse_id` (plus any names you change) in
+Install the overrides files first (`make config`, or the `cp` line under Configuration), and set `warehouse_id` (plus any names you change) in
 `.databricks/bundle/default/variable-overrides.json` (see [Configuration](#configuration-bundle-variables)).
 ```bash
 databricks bundle validate -p $P
@@ -246,6 +228,9 @@ databricks bundle deploy   -p $P
 | Resource | Name |
 |---|---|
 | Lakebase project | `mygpt` (PG 17, 0.5–4 CU autoscaling), with its `production` branch, `primary` read-write endpoint and `databricks_postgres` database |
+| UC volume | `structural_biology.mygpt.docs` (corpus PDFs; protected: `prevent_destroy`) |
+| Secret scope | `mygpt` (values are put in step 4; protected) |
+| Vector Search endpoint | `mygpt-vs` (STANDARD; protected) |
 | UC volume | `structural_biology.mygpt.uploads` (user upload libraries) |
 | UC volume | `structural_biology.mygpt.eval_private` (restricted: owner and metastore admins only) |
 | MLflow experiment | `/Shared/mygpt/mygpt-rag-agent` (shared by agent models, eval runs and production traces) |
@@ -348,48 +333,22 @@ databricks bundle run mygpt_etl -p $P
 | `structured_seed` | Genie seed tables `kinome`, `kinase_papers`, view `corpus_documents` |
 | `sync_index` | *(see below)* |
 
-> **Expected on the first run:** the **`sync_index` task fails** because the Vector Search index
-> doesn't exist yet. The other tasks still complete. Step 8 creates the index, and step 9
-> re-runs the job.
-
-## 8. Create the Vector Search endpoint and index (one-time)
-**Mechanism:** manual CLI. Index creation is not part of any bundle or job.
-
-```bash
-databricks vector-search-endpoints create-endpoint mygpt-vs STANDARD -p $P
-# wait until the endpoint is ONLINE, then:
-databricks vector-search-indexes create-index -p $P --json '{
-  "name": "structural_biology.mygpt.doc_chunks_corpus_index",
-  "endpoint_name": "mygpt-vs",
-  "primary_key": "chunk_id",
-  "index_type": "DELTA_SYNC",
-  "delta_sync_index_spec": {
-    "source_table": "structural_biology.mygpt.doc_chunks",
-    "pipeline_type": "TRIGGERED",
-    "embedding_source_columns": [
-      {"name": "chunk_text", "embedding_model_endpoint_name": "mygpt-bge-m3"}
-    ],
-    "columns_to_sync": ["chunk_id","doc_id","source_name","corpus","section","page","elem_type","chunk_text"]
-  }
-}'
-```
-The index embeds through the **model** endpoint `mygpt-bge-m3`, not the `mygpt-embeddings`
-gateway: AI Search rejects external-model (gateway) endpoints as managed embedding models.
-
-**Creates:** Vector Search endpoint `mygpt-vs`; Delta Sync index
-`structural_biology.mygpt.doc_chunks_corpus_index`. The initial sync starts on creation.
-
-## 9. Second ETL run
-**Bundle:** platform (`bundle run mygpt_etl`)
-
-```bash
-databricks bundle run mygpt_etl -p $P
-```
-Unchanged files aren't re-parsed, so this run is quick. `sync_index` now triggers a sync, waits
-for it, and fails if the index's `indexed_row_count` doesn't equal `count(doc_chunks)`.
+`sync_index` syncs the Vector Search index over `doc_chunks` and waits for it, failing if the
+index's `indexed_row_count` doesn't equal `count(doc_chunks)`. **On the first run it creates the
+index**: `structural_biology.mygpt.doc_chunks_corpus_index`, TRIGGERED Delta Sync, on endpoint
+`mygpt-vs`. Its initial sync embeds all chunks. The index embeds `chunk_text` through the
+**model** endpoint `mygpt-bge-m3`, not the `mygpt-embeddings` gateway, because AI Search rejects
+external-model (gateway) endpoints as managed embedding models. Later runs only re-parse new or
+changed files.
 
 **Verify:** every task is green. To check parse quality:
 `SELECT corpus, parser, reason, count(*) FROM structural_biology.mygpt.doc_parse_quality GROUP BY ALL`.
+
+## 8. *(Folded into step 7)*
+The Vector Search endpoint is a bundle resource (step 2), and `mygpt_etl` creates the index.
+
+## 9. *(Folded into step 7)*
+A second ETL run is no longer needed.
 
 ## 10. Deploy the RAG agent
 **Bundle:** platform (`bundle run mygpt_deploy_agent`) → `agents/rag_agent/driver.py`
@@ -512,12 +471,19 @@ the public BioASQ gold is available. See [`eval/README.md`](eval/README.md).
 - **Rotate `mygpt/gw_upstream_token`** before it expires, or all three gateway endpoints stop working.
 
 ## Teardown
+The docs volume, secret scope and VS endpoint are `prevent_destroy`, so `bundle destroy` refuses
+to run while they're managed. Release them first, which leaves them in place, then destroy:
 ```bash
 cd app && databricks bundle destroy -p $P && cd ..
+for r in docs mygpt_secrets mygpt_vs; do databricks bundle deployment unbind $r -p $P; done
 databricks bundle destroy -p $P
 ```
-`bundle destroy` doesn't remove the objects created by jobs or by hand. Delete these separately:
-the serving endpoints (`mygpt-bge-m3`, `mygpt-embeddings`, `mygpt-chat`, `mygpt-translate`,
-`mygpt-rag-agent`, `mygpt-supervisor`); the VS index and the `mygpt-vs` endpoint; the Genie
-space; the UC models, tables, the `docs` volume and the `mygpt` / `mygpt_tools` schemas; the
-three HTTP connections; and the `mygpt` secret scope.
+`bundle destroy` doesn't remove the objects created by jobs or by hand, or the three released
+above. Delete these separately:
+- the serving endpoints (`mygpt-bge-m3`, `mygpt-embeddings`, `mygpt-chat`, `mygpt-translate`,
+  `mygpt-rag-agent`, `mygpt-supervisor`);
+- the VS index and the `mygpt-vs` endpoint;
+- the Genie space;
+- the UC models, tables, the `docs` volume and the `mygpt` / `mygpt_tools` schemas;
+- the three HTTP connections;
+- the `mygpt` secret scope.
