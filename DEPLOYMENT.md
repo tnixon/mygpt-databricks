@@ -158,7 +158,7 @@ Notes:
   `ncbi_eutils`, used as literals inside the tool functions), the Lakebase Postgres schema the app
   creates (`MYGPT_PG_SCHEMA` in `app/app.yaml`; keep it equal to `pg_schema`), and the
   `etl/config/*.csv` model ids.
-- CLI profile: the `Makefile` default is `stjude-mygpt`. Pass `PROFILE=<profile>` to every `make` target.
+- CLI profile: the `Makefile` default is `mygpt`. Pass `PROFILE=<profile>` to any `make` target to change it.
 
 The commands below use these placeholders:
 ```bash
@@ -174,21 +174,36 @@ Run every platform-bundle command from the **repo root**, and every app-bundle c
 
 ## Deployment steps at a glance
 
-| # | Step | Bundle / mechanism | Creates |
-|---|---|---|---|
-| 1 | Bootstrap UC, workspace folder, secret scope | manual | schema `mygpt`, volume `docs`, `/Shared/mygpt`, secret scope `mygpt` |
-| 2 | Deploy the platform bundle | platform `bundle deploy` | Lakebase project, `uploads` + `eval_private` volumes, experiment, dashboard, 14 jobs |
-| 3 | Deploy the embedding model | platform `run mygpt_deploy_embedding` | UC model `bge_m3`, endpoint `mygpt-bge-m3` |
-| 4 | Store the gateway upstream token | manual | secret `mygpt/gw_upstream_token` |
-| 5 | Deploy the AI Gateway endpoints | platform `run mygpt_deploy_gateway`, `…_chat_gateway`, `…_translate_gateway` | `mygpt-embeddings`, `mygpt-chat`, `mygpt-translate` |
-| 6 | Upload the document corpora | `make` / `databricks fs cp` | PDFs in the `docs` volume |
-| 7 | First ETL run | platform `run mygpt_etl` | Document, chunk, config, section and Genie seed tables |
-| 8 | Create the Vector Search endpoint + index | manual (one-time) | VS endpoint `mygpt-vs`, index `doc_chunks_corpus_index` |
-| 9 | Second ETL run | platform `run mygpt_etl` | Index synced and row-count checked |
-| 10 | Deploy the RAG agent | platform `run mygpt_deploy_agent` | UC model `mygpt_rag_agent`, endpoint `mygpt-rag-agent` |
-| 11 | Supervisor, tools, Genie | platform `run mygpt_deploy_tools`, `…_genie`, `…_supervisor` | UC connections + functions, Genie space, endpoint `mygpt-supervisor` |
-| 12 | Deploy the app | app `bundle deploy` + `bundle run app` | App `st-jude-mygpt`; Lakebase schema `mygpt` on first start |
-| 13 | *(optional)* Evaluation + monitoring | `make eval-private` + platform `run mygpt_eval_*` | UC eval datasets, eval runs, monitoring scorers |
+| # | Step | Bundle / mechanism | `make` | Creates |
+|---|---|---|---|---|
+| 1 | Bootstrap UC, workspace folder, secret scope | manual | `make bootstrap` | schema `mygpt`, volume `docs`, `/Shared/mygpt`, secret scope `mygpt` |
+| 2 | Deploy the platform bundle | platform `bundle deploy` | `make deploy-platform` | Lakebase project, `uploads` + `eval_private` volumes, experiment, dashboard, 14 jobs |
+| 3 | Deploy the embedding model | platform `run mygpt_deploy_embedding` | `make run-deploy_embedding` | UC model `bge_m3`, endpoint `mygpt-bge-m3` |
+| 4 | Store the gateway upstream token | manual | `make secrets` | secret `mygpt/gw_upstream_token` |
+| 5 | Deploy the AI Gateway endpoints | platform `run mygpt_deploy_gateway`, `…_chat_gateway`, `…_translate_gateway` | `make gateways` | `mygpt-embeddings`, `mygpt-chat`, `mygpt-translate` |
+| 6 | Upload the document corpora | `make` / `databricks fs cp` | `make eval-corpus` / `corpus-hi` | PDFs in the `docs` volume |
+| 7 | First ETL run | platform `run mygpt_etl` | `make run-etl` | Document, chunk, config, section and Genie seed tables |
+| 8 | Create the Vector Search endpoint + index | manual (one-time) | `make vs-index` | VS endpoint `mygpt-vs`, index `doc_chunks_corpus_index` |
+| 9 | Second ETL run | platform `run mygpt_etl` | `make run-etl` | Index synced and row-count checked |
+| 10 | Deploy the RAG agent | platform `run mygpt_deploy_agent` | `make run-deploy_agent` | UC model `mygpt_rag_agent`, endpoint `mygpt-rag-agent` |
+| 11 | Supervisor, tools, Genie | platform `run mygpt_deploy_tools`, `…_genie`, `…_supervisor` | `make agents` | UC connections + functions, Genie space, endpoint `mygpt-supervisor` |
+| 12 | Deploy the app | app `bundle deploy` + `bundle run app` | `make sync-ids app-run` | App `st-jude-mygpt`; Lakebase schema `mygpt` on first start |
+| 13 | *(optional)* Evaluation + monitoring | `make eval-private` + platform `run mygpt_eval_*` | `make eval-private run-eval_build_datasets run-eval run-eval_reference run-eval_monitor` | UC eval datasets, eval runs, monitoring scorers |
+
+**Fast path with `make`.** Every `run-<job>` deploys the platform bundle first, so the code that
+runs is always the code in your checkout. Make runs a target once per invocation, which is why
+the two ETL runs are separate commands:
+```bash
+make config                    # then edit both variable-overrides.json files (warehouse_id, names)
+make bootstrap deploy-platform secrets run-deploy_embedding gateways PROFILE=$P
+make eval-corpus PROFILE=$P [KINASE_PDFS=<dir>]
+make run-etl PROFILE=$P        # sync_index fails on this first run (no index yet); that's expected
+make vs-index PROFILE=$P
+make run-etl PROFILE=$P
+make run-deploy_agent agents sync-ids app-run PROFILE=$P
+```
+`make config-check` (also run by `deploy-app`) catches names that differ between the two bundles.
+`make summary` and `make app-logs` help with verification.
 
 ---
 

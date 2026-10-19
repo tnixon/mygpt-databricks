@@ -36,12 +36,16 @@ make init
 ## Common tasks (`make`)
 ```bash
 make dev                 # run the app locally → http://localhost:8000
-make validate            # validate the app before deploy
-make deploy              # deploy to the workspace
+make config              # install both bundles' variable-overrides.json (then edit names / ids)
+make validate            # validate both bundles (platform + app)
+make deploy              # deploy both bundles
+make run-etl             # deploy the platform bundle, then run job mygpt_etl (any job: run-<name>)
+make app-run             # deploy the app bundle and restart the app on the new code
 make submodules-update   # bump reference/ submodules to latest upstream, then commit the pointers
 make help                # list all targets
 ```
-Override the workspace with `PROFILE=<name>` (default `stjude-mygpt`), e.g. `make deploy PROFILE=stjude-mygpt`.
+Override the workspace with `PROFILE=<name>` (default `mygpt`), e.g. `make deploy PROFILE=mygpt`.
+The full deployment sequence is in [DEPLOYMENT.md](DEPLOYMENT.md#deployment-steps-at-a-glance).
 
 ## Scope
 Phase-1 POC: **grant-application use case, no PHI**, built in the sandbox. Design docs (architecture diagram, POC doc, repo insights, UX spec, design tokens) live in the FE project workspace.
