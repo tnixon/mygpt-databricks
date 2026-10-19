@@ -7,6 +7,10 @@
 -- are inlined here as VALUES so the ETL job is self-contained (no volume/CSV read
 -- step). Edit both when tuning, or point a later job at the CSVs if preferred.
 
+-- Job parameters (databricks.yml sql_task.parameters): catalog, schema, docs_volume.
+USE CATALOG IDENTIFIER(:catalog);
+USE SCHEMA IDENTIFIER(:schema);
+
 -- Per-dataset coefficients + retrieval settings (one row per library / corpus).
 -- Phase 2 adds one row per eval corpus (dataset_name = corpus). Phase 6 (multilingual):
 --   * non-English corpora rerank with MyGPT's multilingual default,
@@ -19,7 +23,7 @@
 --     Off until bm25_best/worst are calibrated for it (ARS saturated at 100 on English);
 --   * default_<language> rows are the configs for upload libraries in that language
 --     (app/server/db/store.ts configDatasetFor). 'unknown' reranks multilingually, no translation.
-CREATE OR REPLACE TABLE structural_biology.mygpt.dataset_config AS
+CREATE OR REPLACE TABLE dataset_config AS
 SELECT * FROM VALUES
   ('mygpt', 'bge-m3', 'structure_preserving', 1000, false, true, true,
    'cross-encoder/qnli-electra-base', 'english', 'cosine',
@@ -73,13 +77,13 @@ AS t(dataset_name, embedding_model, chunking_method, chunksize, overlap, use_bm2
 -- bge-m3 values are BOOTSTRAP placeholders in cosine-DISTANCE space (= 1 - cosine
 -- similarity). Recalibrate from reference Q/A pairs (workstream C); MyGPT's own
 -- Ollama-L2 numbers do NOT transfer.
-CREATE OR REPLACE TABLE structural_biology.mygpt.embedding_model_cutoffs AS
+CREATE OR REPLACE TABLE embedding_model_cutoffs AS
 SELECT * FROM VALUES
   ('bge-m3', 0.10, 0.80, 0.10, 0.80, 'BOOTSTRAP cosine-distance placeholders; recalibrate in workstream C')
 AS t(model_name, best_distance_q, worst_distance_q, best_distance_ac, worst_distance_ac, calibration_note);
 
 -- Reranker + NLI model thresholds.
-CREATE OR REPLACE TABLE structural_biology.mygpt.reranker_config AS
+CREATE OR REPLACE TABLE reranker_config AS
 SELECT * FROM VALUES
   ('cross-encoder/qnli-electra-base', 0.10, 'english',
    'Query<->source relevance reranker (sigmoid). Sources below cutoff are dropped.'),
@@ -90,6 +94,6 @@ SELECT * FROM VALUES
 AS t(model_name, cutoff_score, language, note);
 
 -- Sanity:
---   SELECT * FROM structural_biology.mygpt.dataset_config;
---   SELECT * FROM structural_biology.mygpt.embedding_model_cutoffs;
---   SELECT section_title, section_count FROM structural_biology.mygpt.paper_sections ORDER BY section_count DESC;
+--   SELECT * FROM <catalog>.<schema>.dataset_config;
+--   SELECT * FROM <catalog>.<schema>.embedding_model_cutoffs;
+--   SELECT section_title, section_count FROM <catalog>.<schema>.paper_sections ORDER BY section_count DESC;

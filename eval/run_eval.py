@@ -276,6 +276,9 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--predict-timeout", type=int, default=300, help="seconds per endpoint call")
     ap.add_argument("--git-sha", default="")
+    # Full /Volumes paths of the deployment's docs / private ground-truth volumes ("" = defaults).
+    ap.add_argument("--docs-volume", default="")
+    ap.add_argument("--private-volume", default="")
     ap.add_argument("--base-dir", default="")
     args = ap.parse_args()
 
@@ -289,6 +292,7 @@ def main() -> None:
     import scorers as sc
     from mlflow.genai import datasets
 
+    eval_datasets.configure(args.docs_volume, args.private_volume)
     spec = eval_datasets.specs(args.catalog, args.schema)[args.dataset]
     mlflow.set_experiment(args.experiment)
     data = datasets.get_dataset(name=spec.uc_table)

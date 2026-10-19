@@ -13,7 +13,9 @@ import os
 import re
 
 SQL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sql", "02_functions.sql")
-TOOLS_SCHEMA = "structural_biology.mygpt_tools"
+# Functions are created unqualified under USE SCHEMA :tools_schema, or (when the body reads the
+# data schema) as IDENTIFIER(:tools_schema || '.<fn>').
+FN_NAME = r"(?:IDENTIFIER\(:tools_schema \|\| '\.(?P<q>\w+)'\)|(?P<u>\w+))"
 
 
 def _sql() -> str:
@@ -24,7 +26,7 @@ def _sql() -> str:
 def python_udf(name: str):
     """Compile a LANGUAGE PYTHON function body from the SQL file into a callable."""
     m = re.search(
-        rf"FUNCTION\s+{re.escape(TOOLS_SCHEMA)}\.{name}\((?P<params>.*?)\)\s*RETURNS.*?AS \$\$\n(?P<body>.*?)\$\$",
+        rf"FUNCTION\s+(?:IDENTIFIER\(:tools_schema \|\| '\.{name}'\)|{name})\((?P<params>.*?)\)\s*RETURNS.*?AS \$\$\n(?P<body>.*?)\$\$",
         _sql(), re.S,
     )
     assert m, f"{name}: no Python body"
@@ -51,7 +53,8 @@ def test_pubmed_ids_from_text():
 def test_every_tool_is_documented():
     """MCP tool descriptions and argument schemas come from the COMMENTs."""
     sql = _sql()
-    fns = re.findall(rf"CREATE OR REPLACE FUNCTION {re.escape(TOOLS_SCHEMA)}\.(\w+)\((.*?)\)\s*RETURNS(.*?)(?:AS \$\$|RETURN)", sql, re.S)
+    fns = [(m["q"] or m["u"], m["params"], m["tail"]) for m in re.finditer(
+        rf"CREATE OR REPLACE FUNCTION {FN_NAME}\((?P<params>.*?)\)\s*RETURNS(?P<tail>.*?)(?:AS \$\$|RETURN)", sql, re.S)]
     names = {n for n, _, _ in fns}
     assert names == {"pubmed_ids_from_text", "pubmed_summary", "search_pdb_by_gene", "search_pdb",
                      "get_pdb_details", "list_corpora", "list_corpus_documents"}

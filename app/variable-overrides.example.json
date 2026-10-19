@@ -1,0 +1,16 @@
+{
+  "app_name": "st-jude-mygpt",
+  "app_description": "St. Jude MyGPT — governed research assistant (POC)",
+  "catalog": "structural_biology",
+  "schema": "mygpt",
+  "uploads_volume": "uploads",
+  "fm_sonnet": "databricks-claude-sonnet-5",
+  "fm_llama": "databricks-llama-4-maverick",
+  "fm_gptoss": "databricks-gpt-oss-120b",
+  "supervisor_endpoint": "mygpt-supervisor",
+  "embeddings_gateway": "mygpt-embeddings",
+  "warehouse_id": "79388385e899d08b",
+  "upload_job_id": "352016610803853",
+  "experiment_id": "2750091371639406",
+  "pg_branch": "projects/mygpt/branches/production"
+}

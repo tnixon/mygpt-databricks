@@ -74,14 +74,17 @@ def main() -> None:
     ap.add_argument("--upstream-endpoint", default="")
     # Same-workspace self-reference; derived from the client host when empty.
     ap.add_argument("--workspace-url", default="")
-    ap.add_argument("--token-secret", default="{{secrets/mygpt/gw_upstream_token}}")
+    # Secret NAMES only; the endpoint resolves {{secrets/<scope>/<key>}} itself. Passed as plain
+    # names because a job parameter containing {{...}} is read as a dynamic value reference.
+    ap.add_argument("--secret-scope", default="mygpt")
+    ap.add_argument("--token-secret-key", default="gw_upstream_token")
     # chat / translate: per-user calls per minute across all consumers of the endpoint.
     ap.add_argument("--user-calls-per-minute", type=int, default=60)
     # chat only: the Azure AI Foundry route (Azure OpenAI-compatible deployment). Off when empty.
     ap.add_argument("--azure-endpoint", default="")
     ap.add_argument("--azure-deployment", default="")
     ap.add_argument("--azure-api-version", default="2024-10-21")
-    ap.add_argument("--azure-key-secret", default="{{secrets/mygpt/azure_foundry_key}}")
+    ap.add_argument("--azure-key-secret-key", default="azure_foundry_key")
     ap.add_argument("--base-dir", default="")  # accepted for job parity; unused here
     args = ap.parse_args()
 
@@ -101,7 +104,7 @@ def main() -> None:
                 task=task,
                 databricks_model_serving_config=DatabricksModelServingConfig(
                     databricks_workspace_url=workspace_url,
-                    databricks_api_token=args.token_secret,
+                    databricks_api_token=f"{{{{secrets/{args.secret_scope}/{args.token_secret_key}}}}}",
                 ),
             ),
         )
@@ -122,7 +125,7 @@ def main() -> None:
                     openai_api_base=args.azure_endpoint,
                     openai_deployment_name=args.azure_deployment,
                     openai_api_version=args.azure_api_version,
-                    openai_api_key=args.azure_key_secret,
+                    openai_api_key=f"{{{{secrets/{args.secret_scope}/{args.azure_key_secret_key}}}}}",
                 ),
             ),
         ))

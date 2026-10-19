@@ -25,7 +25,8 @@
 #
 # NOTE 1: Vector Search index CREATION remains a one-time API step (see the tail of
 # etl/sql/02b_chunk_merge.sql); SYNCING it is the last task of mygpt_etl.
-# NOTE 2: mygpt_deploy_gateway needs a secret token with CAN QUERY on mygpt-bge-m3:
+# NOTE 2: mygpt_deploy_gateway needs a secret token with CAN QUERY on mygpt-bge-m3
+# (scope / key = var.secret_scope / var.gw_token_secret_key):
 #   databricks secrets create-scope mygpt --profile mygpt   # if absent
 #   databricks secrets put-secret mygpt gw_upstream_token --profile mygpt
 
@@ -43,20 +44,114 @@ sync:
     # St. Jude's private ground truths go to the restricted eval_private volume instead.
     - "reference/MyGPT-evaluations-private-main/**"
 
+# Every resource name below is a variable. The current deployment's values live in
+# .databricks/bundle/default/variable-overrides.json (gitignored; `make config` installs it from
+# variable-overrides.example.json). Precedence: --var > BUNDLE_VAR_<name> > overrides file > default.
+# Keys shared with the app bundle (app/databricks.yml) must match there too — see DEPLOYMENT.md.
 variables:
+  # ------------------------------------------------------------- infrastructure
   warehouse_id:
     description: SQL warehouse that runs the ETL SQL (serverless recommended).
     default: ""
   catalog:
+    description: UC catalog holding the MyGPT schemas.
     default: structural_biology
   schema:
+    description: UC schema for the corpus tables, indexes, volumes, models and eval datasets.
     default: mygpt
+  tools_schema:
+    description: UC schema (in `catalog`) whose functions are the Supervisor's managed-MCP tools.
+    default: mygpt_tools
+  docs_volume:
+    description: UC volume (in catalog.schema) holding the governed corpus PDFs, one folder per corpus.
+    default: docs
+  uploads_volume:
+    description: UC volume (in catalog.schema) holding the app's upload libraries.
+    default: uploads
+  eval_private_volume:
+    description: Restricted UC volume (in catalog.schema) holding St. Jude's private ground truths.
+    default: eval_private
+  vs_endpoint:
+    description: Vector Search endpoint serving the corpus index.
+    default: mygpt-vs
   vs_index:
     description: Corpus-aware Delta Sync index over doc_chunks (synced by mygpt_etl, queried by the agent).
     default: doc_chunks_corpus_index
   pg_project:
     description: Lakebase project holding the app state (Phase 4). Its default branch is `production`.
     default: mygpt
+  pg_display_name:
+    description: Display name of the Lakebase project.
+    default: MyGPT app state
+  pg_schema:
+    description: Postgres schema (in databricks_postgres) holding the app state.
+    default: mygpt
+  experiment_path:
+    description: Shared MLflow experiment (LoggedModels, eval runs, production traces). Its folder must exist.
+    default: /Shared/mygpt/mygpt-rag-agent
+  # ------------------------------------------------------------- display names
+  name_prefix:
+    description: Prefix of every job and dashboard display name.
+    default: "[mygpt]"
+  dashboard_display_name:
+    description: Benchmarks dashboard title (after name_prefix).
+    default: "Benchmarks — MyGPT vs Databricks agent"
+  genie_title:
+    description: Title of the Genie space over the structured seed tables (the Supervisor finds it by title).
+    default: MyGPT structured data
+  # ------------------------------------------------------------- model serving
+  embedding_model:
+    description: UC model name (in catalog.schema) of the bge-m3 embedding model.
+    default: bge_m3
+  embedding_endpoint:
+    description: Custom bge-m3 Model Serving endpoint (also the Vector Search managed-embedding model).
+    default: mygpt-bge-m3
+  embeddings_gateway:
+    description: Unity AI Gateway embeddings endpoint fronting embedding_endpoint.
+    default: mygpt-embeddings
+  chat_gateway:
+    description: Unity AI Gateway chat endpoint (the agents' default answer model).
+    default: mygpt-chat
+  chat_upstream:
+    description: Foundation-model endpoint behind chat_gateway.
+    default: databricks-claude-sonnet-5
+  translate_gateway:
+    description: Unity AI Gateway translation endpoint for non-English corpora.
+    default: mygpt-translate
+  translate_upstream:
+    description: Foundation-model endpoint behind translate_gateway.
+    default: databricks-gemma-3-12b
+  fm_sonnet:
+    description: Direct FMAPI sonnet endpoint (RAG agent resource; the eval model matrix).
+    default: databricks-claude-sonnet-5
+  fm_llama:
+    description: Direct FMAPI llama endpoint (eval model matrix).
+    default: databricks-llama-4-maverick
+  fm_gptoss:
+    description: Direct FMAPI gpt-oss endpoint (eval model matrix).
+    default: databricks-gpt-oss-120b
+  rag_agent_model:
+    description: UC model name (in catalog.schema) of the RAG ResponsesAgent.
+    default: mygpt_rag_agent
+  rag_agent_endpoint:
+    description: Serving endpoint of the RAG ResponsesAgent (the eval target; called by the Supervisor).
+    default: mygpt-rag-agent
+  supervisor_model:
+    description: UC model name (in catalog.schema) of the Supervisor.
+    default: mygpt_supervisor
+  supervisor_endpoint:
+    description: Serving endpoint of the Supervisor (the app's backend).
+    default: mygpt-supervisor
+  # ------------------------------------------------------------- secret NAMES (never values)
+  secret_scope:
+    description: Secret scope holding the gateway credentials.
+    default: mygpt
+  gw_token_secret_key:
+    description: Secret key (in secret_scope) of the token with CAN QUERY on the gateways' upstream endpoints.
+    default: gw_upstream_token
+  azure_key_secret_key:
+    description: Secret key (in secret_scope) of the Azure AI Foundry API key (chat fallback route).
+    default: azure_foundry_key
 
 resources:
   # ---------------------------------------------------------------- Phase 4: Lakebase
@@ -67,7 +162,7 @@ resources:
   postgres_projects:
     mygpt:
       project_id: ${var.pg_project}
-      display_name: MyGPT app state
+      display_name: ${var.pg_display_name}
       pg_version: 17
       default_endpoint_settings:
         autoscaling_limit_min_cu: 0.5
@@ -78,7 +173,7 @@ resources:
     uploads:
       catalog_name: ${var.catalog}
       schema_name: ${var.schema}
-      name: uploads
+      name: ${var.uploads_volume}
       comment: "MyGPT upload libraries: uploads/<library_id>/<doc_id>__<file>"
 
     # St. Jude's PRIVATE ground truths (SME-labelled MyGPT answers + kinase gold), uploaded by
@@ -89,7 +184,7 @@ resources:
     eval_private:
       catalog_name: ${var.catalog}
       schema_name: ${var.schema}
-      name: eval_private
+      name: ${var.eval_private_volume}
       comment: "PRIVATE: St. Jude MyGPT-evaluations ground truths (restricted; see eval/README.md)"
 
   experiments:
@@ -98,33 +193,41 @@ resources:
     # monitoring scorers (eval/monitor.py). The /Shared/mygpt folder must exist:
     #   databricks workspace mkdirs /Shared/mygpt -p mygpt
     mygpt_rag_agent:
-      name: /Shared/mygpt/mygpt-rag-agent
+      name: ${var.experiment_path}
 
   dashboards:
     # Phase 2 gold evals: Databricks agent vs MyGPT on the benchmarks, read straight from the
     # MLflow system tables (no ETL). Generated by dashboards/build_dashboard.py; see eval/README.md.
     # embed_credentials: viewers see it through the deployer's access to system.mlflow.
     mygpt_benchmarks:
-      display_name: "[mygpt] Benchmarks — MyGPT vs Databricks agent"
+      display_name: "${var.name_prefix} ${var.dashboard_display_name}"
       file_path: ./dashboards/mygpt_benchmarks.lvdash.json
       warehouse_id: ${var.warehouse_id}
       embed_credentials: true
 
   jobs:
     mygpt_etl:
-      name: "[mygpt] ETL — parse, section-chunk, index config"
+      name: "${var.name_prefix} ETL — parse, section-chunk, index config"
       tasks:
         - task_key: landing
           sql_task:
             warehouse_id: ${var.warehouse_id}
             file:
               path: etl/sql/01_landing_documents.sql
+            parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              docs_volume: ${var.docs_volume}
         - task_key: parse_chunk_index
           depends_on: [{ task_key: landing }]
           sql_task:
             warehouse_id: ${var.warehouse_id}
             file:
               path: etl/sql/02_parse_chunk_index.sql
+            parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              docs_volume: ${var.docs_volume}
         # Phase 6: re-extract garbled / script-less (e.g. Hindi without Devanagari) documents
         # with PyMuPDF before chunking; records doc_parse_quality. No-op when nothing is flagged.
         - task_key: parse_fallback
@@ -140,12 +243,20 @@ resources:
             warehouse_id: ${var.warehouse_id}
             file:
               path: etl/sql/02b_chunk_merge.sql
+            parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              docs_volume: ${var.docs_volume}
         - task_key: sections_and_config
           depends_on: [{ task_key: chunk_merge }]
           sql_task:
             warehouse_id: ${var.warehouse_id}
             file:
               path: etl/sql/03_sections_and_config.sql
+            parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              docs_volume: ${var.docs_volume}
         # 02b MERGEs chunk changes into doc_chunks; sync the TRIGGERED index so they become
         # searchable, and wait until it has caught up (fails on a row-count mismatch).
         - task_key: sync_index
@@ -176,7 +287,7 @@ resources:
     # Phase 4: index one upload library into Lakebase. Triggered by the app (job_parameters
     # library_id) after an upload; one active run per library is enforced by the app.
     mygpt_upload_ingest:
-      name: "[mygpt] Upload ingest — parse, chunk, embed into Lakebase"
+      name: "${var.name_prefix} Upload ingest — parse, chunk, embed into Lakebase"
       max_concurrent_runs: 4
       parameters:
         - name: library_id
@@ -189,7 +300,7 @@ resources:
             parameters:
               ["--library-id", "{{job.parameters.library_id}}",
                "--pg-endpoint", "projects/${var.pg_project}/branches/production/endpoints/primary",
-               "--pg-schema", "mygpt", "--embed-endpoint", "mygpt-embeddings"]
+               "--pg-schema", "${var.pg_schema}", "--embed-endpoint", "${var.embeddings_gateway}"]
       environments:
         - environment_key: default
           spec:
@@ -200,14 +311,15 @@ resources:
               - pymupdf>=1.24   # Phase 6: parse fallback
 
     mygpt_deploy_embedding:
-      name: "[mygpt] Deploy bge-m3 embedding endpoint"
+      name: "${var.name_prefix} Deploy bge-m3 embedding endpoint"
       tasks:
         - task_key: deploy_embedding
           environment_key: default
           spark_python_task:
             python_file: agents/embedding/driver.py
             parameters:
-              ["--catalog", "${var.catalog}", "--schema", "${var.schema}", "--base-dir", "${workspace.file_path}"]
+              ["--catalog", "${var.catalog}", "--schema", "${var.schema}", "--base-dir", "${workspace.file_path}",
+               "--model-name", "${var.embedding_model}", "--endpoint-name", "${var.embedding_endpoint}"]
       environments:
         - environment_key: default
           spec:
@@ -219,14 +331,16 @@ resources:
               - torch>=2.3
 
     mygpt_deploy_gateway:
-      name: "[mygpt] Deploy Unity AI Gateway embeddings endpoint"
+      name: "${var.name_prefix} Deploy Unity AI Gateway embeddings endpoint"
       tasks:
         - task_key: deploy_gateway
           environment_key: default
           spark_python_task:
             python_file: agents/gateway/driver.py
             parameters:
-              ["--catalog", "${var.catalog}", "--schema", "${var.schema}", "--base-dir", "${workspace.file_path}"]
+              ["--catalog", "${var.catalog}", "--schema", "${var.schema}", "--base-dir", "${workspace.file_path}",
+               "--endpoint-name", "${var.embeddings_gateway}", "--upstream-endpoint", "${var.embedding_endpoint}",
+               "--secret-scope", "${var.secret_scope}", "--token-secret-key", "${var.gw_token_secret_key}"]
       environments:
         - environment_key: default
           spec:
@@ -242,7 +356,7 @@ resources:
     #   --azure-endpoint https://<res>.openai.azure.com --azure-deployment <name>
     # once St. Jude shares it (secret mygpt/azure_foundry_key).
     mygpt_deploy_chat_gateway:
-      name: "[mygpt] Deploy Unity AI Gateway chat endpoint"
+      name: "${var.name_prefix} Deploy Unity AI Gateway chat endpoint"
       tasks:
         - task_key: deploy_chat_gateway
           environment_key: default
@@ -250,7 +364,10 @@ resources:
             python_file: agents/gateway/driver.py
             parameters:
               ["--task", "chat", "--catalog", "${var.catalog}", "--schema", "${var.schema}",
-               "--base-dir", "${workspace.file_path}"]
+               "--base-dir", "${workspace.file_path}",
+               "--endpoint-name", "${var.chat_gateway}", "--upstream-endpoint", "${var.chat_upstream}",
+               "--secret-scope", "${var.secret_scope}", "--token-secret-key", "${var.gw_token_secret_key}",
+               "--azure-key-secret-key", "${var.azure_key_secret_key}"]
       environments:
         - environment_key: default
           spec:
@@ -261,7 +378,7 @@ resources:
     # Phase 6: mygpt-translate -> databricks-gemma-3-12b, the RAG agent's query/answer
     # translator for non-English corpora (same upstream secret as the other gateways).
     mygpt_deploy_translate_gateway:
-      name: "[mygpt] Deploy Unity AI Gateway translation endpoint"
+      name: "${var.name_prefix} Deploy Unity AI Gateway translation endpoint"
       tasks:
         - task_key: deploy_translate_gateway
           environment_key: default
@@ -269,7 +386,9 @@ resources:
             python_file: agents/gateway/driver.py
             parameters:
               ["--task", "translate", "--catalog", "${var.catalog}", "--schema", "${var.schema}",
-               "--base-dir", "${workspace.file_path}"]
+               "--base-dir", "${workspace.file_path}",
+               "--endpoint-name", "${var.translate_gateway}", "--upstream-endpoint", "${var.translate_upstream}",
+               "--secret-scope", "${var.secret_scope}", "--token-secret-key", "${var.gw_token_secret_key}"]
       environments:
         - environment_key: default
           spec:
@@ -280,7 +399,7 @@ resources:
     # Phase 5: the domain tools as UC functions in <catalog>.mygpt_tools (served by managed
     # MCP) and the HTTP connections they call.
     mygpt_deploy_tools:
-      name: "[mygpt] Deploy UC-function tools (managed MCP)"
+      name: "${var.name_prefix} Deploy UC-function tools (managed MCP)"
       tasks:
         - task_key: connections
           sql_task:
@@ -293,10 +412,14 @@ resources:
             warehouse_id: ${var.warehouse_id}
             file:
               path: agents/tools/sql/02_functions.sql
+            parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              tools_schema: ${var.tools_schema}
 
     # Phase 5: Genie space over the structured seed tables (mygpt_etl structured_seed).
     mygpt_deploy_genie:
-      name: "[mygpt] Deploy Genie space (structured data)"
+      name: "${var.name_prefix} Deploy Genie space (structured data)"
       tasks:
         - task_key: deploy_genie
           environment_key: default
@@ -304,7 +427,7 @@ resources:
             python_file: agents/genie/driver.py
             parameters:
               ["--catalog", "${var.catalog}", "--schema", "${var.schema}", "--warehouse-id", "${var.warehouse_id}",
-               "--base-dir", "${workspace.file_path}"]
+               "--base-dir", "${workspace.file_path}", "--title", "${var.genie_title}"]
       environments:
         - environment_key: default
           spec:
@@ -314,7 +437,7 @@ resources:
 
     # Phase 5: the Supervisor. Needs mygpt-chat, mygpt-rag-agent, the tools and the Genie space.
     mygpt_deploy_supervisor:
-      name: "[mygpt] Deploy MyGPT Supervisor ResponsesAgent endpoint"
+      name: "${var.name_prefix} Deploy MyGPT Supervisor ResponsesAgent endpoint"
       tasks:
         - task_key: deploy_supervisor
           environment_key: default
@@ -322,7 +445,10 @@ resources:
             python_file: agents/supervisor/driver.py
             parameters:
               ["--catalog", "${var.catalog}", "--schema", "${var.schema}", "--warehouse-id", "${var.warehouse_id}",
-               "--base-dir", "${workspace.file_path}", "--experiment", "${resources.experiments.mygpt_rag_agent.name}"]
+               "--base-dir", "${workspace.file_path}", "--experiment", "${resources.experiments.mygpt_rag_agent.name}",
+               "--tools-schema", "${var.tools_schema}", "--model-name", "${var.supervisor_model}",
+               "--endpoint-name", "${var.supervisor_endpoint}", "--llm-endpoint", "${var.chat_gateway}",
+               "--rag-endpoint", "${var.rag_agent_endpoint}", "--genie-title", "${var.genie_title}"]
       environments:
         - environment_key: default
           spec:
@@ -335,7 +461,7 @@ resources:
               - databricks-sdk>=0.40
 
     mygpt_deploy_agent:
-      name: "[mygpt] Deploy MyGPT RAG ResponsesAgent endpoint"
+      name: "${var.name_prefix} Deploy MyGPT RAG ResponsesAgent endpoint"
       tasks:
         - task_key: deploy_agent
           environment_key: default
@@ -343,7 +469,12 @@ resources:
             python_file: agents/rag_agent/driver.py
             parameters:
               ["--catalog", "${var.catalog}", "--schema", "${var.schema}", "--base-dir", "${workspace.file_path}",
-               "--experiment", "${resources.experiments.mygpt_rag_agent.name}", "--vs-index-name", "${var.vs_index}"]
+               "--experiment", "${resources.experiments.mygpt_rag_agent.name}", "--vs-index-name", "${var.vs_index}",
+               "--model-name", "${var.rag_agent_model}", "--endpoint-name", "${var.rag_agent_endpoint}",
+               "--vs-endpoint", "${var.vs_endpoint}", "--embed-endpoint", "${var.embeddings_gateway}",
+               "--vs-embed-endpoint", "${var.embedding_endpoint}", "--chat-endpoint", "${var.chat_gateway}",
+               "--translate-endpoint", "${var.translate_gateway}", "--sonnet-endpoint", "${var.fm_sonnet}",
+               "--llama-endpoint", "${var.fm_llama}", "--gptoss-endpoint", "${var.fm_gptoss}"]
       environments:
         - environment_key: default
           spec:
@@ -361,7 +492,7 @@ resources:
 
     # ---------------------------------------------------------------- Phase 2: eval
     mygpt_eval_build_datasets:
-      name: "[mygpt] Eval — build UC eval datasets (MyGPT-evaluations)"
+      name: "${var.name_prefix} Eval — build UC eval datasets (MyGPT-evaluations)"
       tasks:
         - task_key: build_datasets
           environment_key: eval
@@ -370,7 +501,9 @@ resources:
             parameters:
               ["--catalog", "${var.catalog}", "--schema", "${var.schema}", "--base-dir", "${workspace.file_path}",
                "--experiment", "${resources.experiments.mygpt_rag_agent.name}",
-               "--datasets", "{{job.parameters.datasets}}"]
+               "--datasets", "{{job.parameters.datasets}}",
+               "--docs-volume", "/Volumes/${var.catalog}/${var.schema}/${var.docs_volume}",
+               "--private-volume", "/Volumes/${var.catalog}/${var.schema}/${var.eval_private_volume}"]
       parameters:
         - name: datasets
           default: "health_policies_fr,health_policies_es,health_policies_hi,kinase_literature,bioasq"
@@ -381,7 +514,7 @@ resources:
             dependencies: ["mlflow[databricks]>=3.4", "databricks-agents", "databricks-sdk>=0.40", "pyyaml"]
 
     mygpt_eval:
-      name: "[mygpt] Eval — mlflow.genai.evaluate over dataset x model (+ gates)"
+      name: "${var.name_prefix} Eval — mlflow.genai.evaluate over dataset x model (+ gates)"
       parameters:
         # One run per {dataset, model}; add llama / gptoss entries for the model comparison.
         - name: matrix
@@ -409,7 +542,9 @@ resources:
                    "--catalog", "${var.catalog}", "--schema", "${var.schema}", "--base-dir", "${workspace.file_path}",
                    "--experiment", "${resources.experiments.mygpt_rag_agent.name}",
                    "--max-rows", "{{job.parameters.max_rows}}", "--gate", "{{job.parameters.gate}}",
-                   "--translate", "{{job.parameters.translate}}"]
+                   "--translate", "{{job.parameters.translate}}", "--endpoint", "${var.rag_agent_endpoint}",
+                   "--docs-volume", "/Volumes/${var.catalog}/${var.schema}/${var.docs_volume}",
+                   "--private-volume", "/Volumes/${var.catalog}/${var.schema}/${var.eval_private_volume}"]
       environments:
         - environment_key: eval
           spec:
@@ -419,7 +554,7 @@ resources:
     # MyGPT parity baseline + judge agreement from MyGPT's own recorded answers (no agent
     # endpoint calls; the LLM correctness judge runs unless judge=false).
     mygpt_eval_reference:
-      name: "[mygpt] Eval — MyGPT reference baseline + judge agreement"
+      name: "${var.name_prefix} Eval — MyGPT reference baseline + judge agreement"
       parameters:
         - name: judge
           default: "true"
@@ -430,7 +565,9 @@ resources:
             python_file: eval/reference_baseline.py
             parameters:
               ["--base-dir", "${workspace.file_path}", "--experiment", "${resources.experiments.mygpt_rag_agent.name}",
-               "--judge", "{{job.parameters.judge}}"]
+               "--judge", "{{job.parameters.judge}}",
+               "--docs-volume", "/Volumes/${var.catalog}/${var.schema}/${var.docs_volume}",
+               "--private-volume", "/Volumes/${var.catalog}/${var.schema}/${var.eval_private_volume}"]
       environments:
         - environment_key: eval
           spec:
@@ -438,7 +575,7 @@ resources:
             dependencies: ["mlflow[databricks]>=3.4", "databricks-agents", "databricks-sdk>=0.40", "pyyaml"]
 
     mygpt_eval_monitor:
-      name: "[mygpt] Eval — register production-monitoring scorers"
+      name: "${var.name_prefix} Eval — register production-monitoring scorers"
       tasks:
         - task_key: monitor
           environment_key: eval

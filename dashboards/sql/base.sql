@@ -1,11 +1,12 @@
 -- Shared CTEs, prepended to every dataset query by build_dashboard.py.
--- Source: MLflow's system tables (runs + their logged metrics) for the shared experiment.
+-- Source: MLflow's system tables (runs + their logged metrics) for the shared experiment
+-- (its name is filled in by build_dashboard.py --experiment, i.e. var.experiment_path).
 WITH runs AS (
   SELECT r.run_id, r.experiment_id, r.run_name, r.start_time, r.tags, r.params, r.aggregated_metrics
   FROM system.mlflow.runs_latest r
   JOIN system.mlflow.experiments_latest e
     ON r.workspace_id = e.workspace_id AND r.experiment_id = e.experiment_id
-  WHERE e.name = '/Shared/mygpt/mygpt-rag-agent' AND e.delete_time IS NULL
+  WHERE e.name = '{experiment}' AND e.delete_time IS NULL
     AND r.delete_time IS NULL AND r.status = 'FINISHED'
 ),
 metrics AS (

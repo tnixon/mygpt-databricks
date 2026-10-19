@@ -9,22 +9,34 @@
 PROFILE ?= stjude-mygpt
 APP_DIR := app
 
+# UC location of the volumes below (= the bundles' catalog / schema / *_volume variables).
+CATALOG ?= structural_biology
+SCHEMA ?= mygpt
+
 # Phase-2 eval corpora: one docs-volume folder per corpus (= the agent's custom_inputs.corpus).
-DOCS_VOLUME := dbfs:/Volumes/structural_biology/mygpt/docs
+DOCS_VOLUME := dbfs:/Volumes/$(CATALOG)/$(SCHEMA)/docs
 EVAL_INPUTS := reference/MyGPT-evaluations
 # St. Jude's private ground truths (gitignored) -> the restricted eval_private UC volume.
 EVAL_PRIVATE := reference/MyGPT-evaluations-private-main/ground truths
-PRIVATE_VOLUME := dbfs:/Volumes/structural_biology/mygpt/eval_private
+PRIVATE_VOLUME := dbfs:/Volumes/$(CATALOG)/$(SCHEMA)/eval_private
 KINASE_PDFS ?=   # dir of St. Jude's kinase PDFs, named <pubmed_id>.pdf (not in the submodule)
 
 .DEFAULT_GOAL := help
 
-.PHONY: help init submodules submodules-update install dev build typecheck lint test validate deploy clean eval-corpus corpus-hi eval-private eval-test
+.PHONY: help init config submodules submodules-update install dev build typecheck lint test validate deploy clean eval-corpus corpus-hi eval-private eval-test
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 init: submodules install ## First-time setup: fetch submodules + install app deps
+
+# The bundle CLI reads .databricks/bundle/<target>/variable-overrides.json (gitignored, per checkout).
+config: ## Install both bundles' variable-overrides.json from the committed examples (never overwrites)
+	@for d in . $(APP_DIR); do \
+	  f=$$d/.databricks/bundle/default/variable-overrides.json; \
+	  if [ -f $$f ]; then echo "kept      $$f"; \
+	  else mkdir -p $$(dirname $$f) && cp $$d/variable-overrides.example.json $$f && echo "installed $$f"; fi; \
+	done
 
 submodules: ## Fetch/init reference submodules (stjude/MyGPT, MyGPT-evaluations)
 	git submodule update --init --recursive
