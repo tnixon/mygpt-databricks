@@ -117,17 +117,53 @@ That's why the index points at `mygpt-bge-m3` directly, not `mygpt-embeddings`.
 Work through the [checklist](#required-components-and-services-checklist) above, including the
 preview/beta toggles. Note the **serverless SQL warehouse** id; you'll need it as `$WH`.
 
-### Values to set or edit
-| What | Where | Action |
+### Configuration (bundle variables)
+Every resource name, display name and infrastructure id is a bundle variable: catalog / schema,
+volumes, endpoint and UC model names, the Genie title, the experiment path, the Lakebase project,
+job and dashboard name prefixes, and secret scope / key **names** (never secret values). Each
+variable's default in `databricks.yml` is the current St. Jude deployment value.
+
+Each bundle reads its values from `.databricks/bundle/default/variable-overrides.json`, a
+gitignored file kept per checkout. Install both files from the committed examples, then edit them:
+```bash
+make config     # copies variable-overrides.example.json -> .databricks/bundle/default/ (root + app/); never overwrites
+```
+| File (committed example) | Bundle | Keys |
 |---|---|---|
-| Workspace host | `targets.default.workspace.host` in **both** `databricks.yml` and `app/databricks.yml` | Set it to the new workspace URL |
-| Catalog / schema | `structural_biology` / `mygpt`. Hard-coded in `etl/sql/*.sql`, `agents/tools/sql/*.sql`, `app/app.yaml`, the `uc_securable` names in `app/databricks.yml`, the `Makefile` volume paths and `eval/eval_datasets.py` | Easiest is to keep these names. Using a different catalog means editing all of those files |
-| CLI profile | `Makefile` default is `stjude-mygpt` | Pass `PROFILE=<profile>` to every `make` target |
+| `variable-overrides.example.json` | platform | all platform variables (see `variables:` in `databricks.yml` for descriptions) |
+| `app/variable-overrides.example.json` | app | `app_name`, `catalog`, `schema`, `uploads_volume`, FMAPI / Supervisor / embeddings endpoint names, `warehouse_id`, `upload_job_id`, `experiment_id`, `pg_branch` |
+
+Precedence: `--var name=value` > env `BUNDLE_VAR_<name>` > overrides file > `databricks.yml`
+default. Check the resolved values with `databricks bundle validate -o json`.
+
+**Keep these keys in step across the two files:**
+| Platform key | App key |
+|---|---|
+| `catalog`, `schema`, `uploads_volume` | same names |
+| `supervisor_endpoint`, `embeddings_gateway` | same names |
+| `fm_sonnet`, `fm_llama`, `fm_gptoss` | same names |
+| `pg_project` | `pg_branch` = `projects/<pg_project>/branches/production` |
+| `experiment_path`, job `mygpt_upload_ingest` (both created in step 2) | `experiment_id`, `upload_job_id` (read from `databricks bundle summary`) |
+
+Notes:
+- The ETL and tools SQL take `catalog` / `schema` / `docs_volume` / `tools_schema` as job
+  parameters. The app derives its schema from the `uploads-volume` resource. Changing the catalog
+  therefore only means editing the overrides files (and `CATALOG=` / `SCHEMA=` for the `make`
+  upload targets).
+- The dashboard JSON is static. After changing `experiment_path`, run
+  `python3 dashboards/build_dashboard.py --experiment <path>`, then redeploy.
+- Changing `app_name` creates a **new** app.
+- Not variables: the workspace host (`targets.default.workspace.host` in **both** bundles: set
+  it to the new workspace URL), the UC HTTP connection names (`rcsb_search`, `rcsb_data`,
+  `ncbi_eutils`, used as literals inside the tool functions), the Lakebase Postgres schema the app
+  creates (`MYGPT_PG_SCHEMA` in `app/app.yaml`; keep it equal to `pg_schema`), and the
+  `etl/config/*.csv` model ids.
+- CLI profile: the `Makefile` default is `mygpt`. Pass `PROFILE=<profile>` to any `make` target to change it.
 
 The commands below use these placeholders:
 ```bash
 P=<profile>            # CLI profile
-WH=<warehouse_id>      # serverless SQL warehouse id
+WH=<warehouse_id>      # serverless SQL warehouse id (goes in the overrides files as warehouse_id)
 ```
 Run every platform-bundle command from the **repo root**, and every app-bundle command from `app/`.
 
@@ -138,21 +174,36 @@ Run every platform-bundle command from the **repo root**, and every app-bundle c
 
 ## Deployment steps at a glance
 
-| # | Step | Bundle / mechanism | Creates |
-|---|---|---|---|
-| 1 | Bootstrap UC, workspace folder, secret scope | manual | schema `mygpt`, volume `docs`, `/Shared/mygpt`, secret scope `mygpt` |
-| 2 | Deploy the platform bundle | platform `bundle deploy` | Lakebase project, `uploads` + `eval_private` volumes, experiment, dashboard, 14 jobs |
-| 3 | Deploy the embedding model | platform `run mygpt_deploy_embedding` | UC model `bge_m3`, endpoint `mygpt-bge-m3` |
-| 4 | Store the gateway upstream token | manual | secret `mygpt/gw_upstream_token` |
-| 5 | Deploy the AI Gateway endpoints | platform `run mygpt_deploy_gateway`, `…_chat_gateway`, `…_translate_gateway` | `mygpt-embeddings`, `mygpt-chat`, `mygpt-translate` |
-| 6 | Upload the document corpora | `make` / `databricks fs cp` | PDFs in the `docs` volume |
-| 7 | First ETL run | platform `run mygpt_etl` | Document, chunk, config, section and Genie seed tables |
-| 8 | Create the Vector Search endpoint + index | manual (one-time) | VS endpoint `mygpt-vs`, index `doc_chunks_corpus_index` |
-| 9 | Second ETL run | platform `run mygpt_etl` | Index synced and row-count checked |
-| 10 | Deploy the RAG agent | platform `run mygpt_deploy_agent` | UC model `mygpt_rag_agent`, endpoint `mygpt-rag-agent` |
-| 11 | Supervisor, tools, Genie | platform `run mygpt_deploy_tools`, `…_genie`, `…_supervisor` | UC connections + functions, Genie space, endpoint `mygpt-supervisor` |
-| 12 | Deploy the app | app `bundle deploy` + `bundle run app` | App `st-jude-mygpt`; Lakebase schema `mygpt` on first start |
-| 13 | *(optional)* Evaluation + monitoring | `make eval-private` + platform `run mygpt_eval_*` | UC eval datasets, eval runs, monitoring scorers |
+| # | Step | Bundle / mechanism | `make` | Creates |
+|---|---|---|---|---|
+| 1 | Bootstrap UC, workspace folder, secret scope | manual | `make bootstrap` | schema `mygpt`, volume `docs`, `/Shared/mygpt`, secret scope `mygpt` |
+| 2 | Deploy the platform bundle | platform `bundle deploy` | `make deploy-platform` | Lakebase project, `uploads` + `eval_private` volumes, experiment, dashboard, 14 jobs |
+| 3 | Deploy the embedding model | platform `run mygpt_deploy_embedding` | `make run-deploy_embedding` | UC model `bge_m3`, endpoint `mygpt-bge-m3` |
+| 4 | Store the gateway upstream token | manual | `make secrets` | secret `mygpt/gw_upstream_token` |
+| 5 | Deploy the AI Gateway endpoints | platform `run mygpt_deploy_gateway`, `…_chat_gateway`, `…_translate_gateway` | `make gateways` | `mygpt-embeddings`, `mygpt-chat`, `mygpt-translate` |
+| 6 | Upload the document corpora | `make` / `databricks fs cp` | `make eval-corpus` / `corpus-hi` | PDFs in the `docs` volume |
+| 7 | First ETL run | platform `run mygpt_etl` | `make run-etl` | Document, chunk, config, section and Genie seed tables |
+| 8 | Create the Vector Search endpoint + index | manual (one-time) | `make vs-index` | VS endpoint `mygpt-vs`, index `doc_chunks_corpus_index` |
+| 9 | Second ETL run | platform `run mygpt_etl` | `make run-etl` | Index synced and row-count checked |
+| 10 | Deploy the RAG agent | platform `run mygpt_deploy_agent` | `make run-deploy_agent` | UC model `mygpt_rag_agent`, endpoint `mygpt-rag-agent` |
+| 11 | Supervisor, tools, Genie | platform `run mygpt_deploy_tools`, `…_genie`, `…_supervisor` | `make agents` | UC connections + functions, Genie space, endpoint `mygpt-supervisor` |
+| 12 | Deploy the app | app `bundle deploy` + `bundle run app` | `make sync-ids app-run` | App `st-jude-mygpt`; Lakebase schema `mygpt` on first start |
+| 13 | *(optional)* Evaluation + monitoring | `make eval-private` + platform `run mygpt_eval_*` | `make eval-private run-eval_build_datasets run-eval run-eval_reference run-eval_monitor` | UC eval datasets, eval runs, monitoring scorers |
+
+**Fast path with `make`.** Every `run-<job>` deploys the platform bundle first, so the code that
+runs is always the code in your checkout. Make runs a target once per invocation, which is why
+the two ETL runs are separate commands:
+```bash
+make config                    # then edit both variable-overrides.json files (warehouse_id, names)
+make bootstrap deploy-platform secrets run-deploy_embedding gateways PROFILE=$P
+make eval-corpus PROFILE=$P [KINASE_PDFS=<dir>]
+make run-etl PROFILE=$P        # sync_index fails on this first run (no index yet); that's expected
+make vs-index PROFILE=$P
+make run-etl PROFILE=$P
+make run-deploy_agent agents sync-ids app-run PROFILE=$P
+```
+`make config-check` (also run by `deploy-app`) catches names that differ between the two bundles.
+`make summary` and `make app-logs` help with verification.
 
 ---
 
@@ -184,12 +235,14 @@ databricks secrets create-scope mygpt -p $P
 ## 2. Deploy the platform bundle
 **Bundle:** platform (`bundle deploy`)
 
+Run `make config` first and set `warehouse_id` (plus any names you change) in
+`.databricks/bundle/default/variable-overrides.json` (see [Configuration](#configuration-bundle-variables)).
 ```bash
-databricks bundle validate -p $P --var warehouse_id=$WH
-databricks bundle deploy   -p $P --var warehouse_id=$WH
+databricks bundle validate -p $P
+databricks bundle deploy   -p $P
 ```
 
-**Creates:**
+**Creates** (default names shown):
 | Resource | Name |
 |---|---|
 | Lakebase project | `mygpt` (PG 17, 0.5–4 CU autoscaling), with its `production` branch, `primary` read-write endpoint and `databricks_postgres` database |
@@ -210,7 +263,7 @@ databricks experiments get-by-name /Shared/mygpt/mygpt-rag-agent -p $P   # exper
 **Bundle:** platform (`bundle run mygpt_deploy_embedding`) → `agents/embedding/driver.py`
 
 ```bash
-databricks bundle run mygpt_deploy_embedding -p $P --var warehouse_id=$WH
+databricks bundle run mygpt_deploy_embedding -p $P
 ```
 
 **Creates:**
@@ -240,9 +293,9 @@ databricks secrets put-secret mygpt azure_foundry_key -p $P
 **Bundle:** platform (three jobs, all running `agents/gateway/driver.py --task …`)
 
 ```bash
-databricks bundle run mygpt_deploy_gateway           -p $P --var warehouse_id=$WH
-databricks bundle run mygpt_deploy_chat_gateway      -p $P --var warehouse_id=$WH
-databricks bundle run mygpt_deploy_translate_gateway -p $P --var warehouse_id=$WH
+databricks bundle run mygpt_deploy_gateway           -p $P
+databricks bundle run mygpt_deploy_chat_gateway      -p $P
+databricks bundle run mygpt_deploy_translate_gateway -p $P
 ```
 
 **Creates:**
@@ -281,7 +334,7 @@ add a new corpus, follow the checklist in [`etl/README.md`](etl/README.md#today-
 **Bundle:** platform (`bundle run mygpt_etl`)
 
 ```bash
-databricks bundle run mygpt_etl -p $P --var warehouse_id=$WH
+databricks bundle run mygpt_etl -p $P
 ```
 
 **Creates** (all in `structural_biology.mygpt`):
@@ -330,7 +383,7 @@ gateway: AI Search rejects external-model (gateway) endpoints as managed embeddi
 **Bundle:** platform (`bundle run mygpt_etl`)
 
 ```bash
-databricks bundle run mygpt_etl -p $P --var warehouse_id=$WH
+databricks bundle run mygpt_etl -p $P
 ```
 Unchanged files aren't re-parsed, so this run is quick. `sync_index` now triggers a sync, waits
 for it, and fails if the index's `indexed_row_count` doesn't equal `count(doc_chunks)`.
@@ -345,7 +398,7 @@ Prerequisites: steps 3, 5 and 8. MLflow runs a full validation `predict` when th
 logged, and that predict calls the index, the embedding endpoints and the chat/translate
 gateways live.
 ```bash
-databricks bundle run mygpt_deploy_agent -p $P --var warehouse_id=$WH
+databricks bundle run mygpt_deploy_agent -p $P
 ```
 
 **Creates:**
@@ -367,9 +420,9 @@ The app's grounded chat runs through the Supervisor (`mygpt-supervisor`), which 
 question to the selected libraries' documents (via `mygpt-rag-agent`), Genie or the tools, so
 deploy it before the app.
 ```bash
-databricks bundle run mygpt_deploy_tools      -p $P --var warehouse_id=$WH
-databricks bundle run mygpt_deploy_genie      -p $P --var warehouse_id=$WH
-databricks bundle run mygpt_deploy_supervisor -p $P --var warehouse_id=$WH
+databricks bundle run mygpt_deploy_tools      -p $P
+databricks bundle run mygpt_deploy_genie      -p $P
+databricks bundle run mygpt_deploy_supervisor -p $P
 ```
 
 **Creates:**
@@ -387,12 +440,13 @@ two-library question that should search only the kinase library).
 
 ```bash
 cd app
-databricks bundle validate -p $P --var warehouse_id=$WH --var upload_job_id=<job id> --var experiment_id=<experiment id>
-databricks bundle deploy   -p $P --var warehouse_id=$WH --var upload_job_id=<job id> --var experiment_id=<experiment id>
+databricks bundle validate -p $P
+databricks bundle deploy   -p $P
 databricks bundle run app  -p $P
 ```
-`<job id>` and `<experiment id>` are the values recorded in step 2. On a fresh workspace,
-**don't** run the `bundle deployment bind` mentioned in `PLAN.md`. That step only applies to the
+Before this, set `warehouse_id`, `upload_job_id` and `experiment_id` in
+`app/.databricks/bundle/default/variable-overrides.json` to the values recorded in step 2. On a
+fresh workspace, **don't** run the `bundle deployment bind` mentioned in `PLAN.md`. That step only applies to the
 original sandbox, where the app already existed.
 
 **Creates:** Databricks App **`st-jude-mygpt`**, which starts on deploy. It calls serving
@@ -432,10 +486,10 @@ hand.
 
 ```bash
 make eval-private PROFILE=$P                                              # private SME ground truths → eval_private volume
-databricks bundle run mygpt_eval_build_datasets -p $P --var warehouse_id=$WH
-databricks bundle run mygpt_eval                -p $P --var warehouse_id=$WH  # matrix of dataset × model; gate=false by default
-databricks bundle run mygpt_eval_reference      -p $P --var warehouse_id=$WH  # MyGPT parity baseline + judge agreement
-databricks bundle run mygpt_eval_monitor        -p $P --var warehouse_id=$WH
+databricks bundle run mygpt_eval_build_datasets -p $P
+databricks bundle run mygpt_eval                -p $P  # matrix of dataset × model; gate=false by default
+databricks bundle run mygpt_eval_reference      -p $P  # MyGPT parity baseline + judge agreement
+databricks bundle run mygpt_eval_monitor        -p $P
 ```
 
 **Creates:** files in the `eval_private` volume; UC MLflow eval datasets in
@@ -460,7 +514,7 @@ the public BioASQ gold is available. See [`eval/README.md`](eval/README.md).
 ## Teardown
 ```bash
 cd app && databricks bundle destroy -p $P && cd ..
-databricks bundle destroy -p $P --var warehouse_id=$WH
+databricks bundle destroy -p $P
 ```
 `bundle destroy` doesn't remove the objects created by jobs or by hand. Delete these separately:
 the serving endpoints (`mygpt-bge-m3`, `mygpt-embeddings`, `mygpt-chat`, `mygpt-translate`,

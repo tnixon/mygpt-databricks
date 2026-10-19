@@ -5,7 +5,8 @@
       "displayName": "Scorecard: Databricks agent vs MyGPT",
       "queryLines": [
         "-- Shared CTEs, prepended to every dataset query by build_dashboard.py.\n",
-        "-- Source: MLflow's system tables (runs + their logged metrics) for the shared experiment.\n",
+        "-- Source: MLflow's system tables (runs + their logged metrics) for the shared experiment\n",
+        "-- (its name is filled in by build_dashboard.py --experiment, i.e. var.experiment_path).\n",
         "WITH runs AS (\n",
         "  SELECT r.run_id, r.experiment_id, r.run_name, r.start_time, r.tags, r.params, r.aggregated_metrics\n",
         "  FROM system.mlflow.runs_latest r\n",
@@ -130,7 +131,8 @@
       "displayName": "Scorecard (long form, for the grouped bar)",
       "queryLines": [
         "-- Shared CTEs, prepended to every dataset query by build_dashboard.py.\n",
-        "-- Source: MLflow's system tables (runs + their logged metrics) for the shared experiment.\n",
+        "-- Source: MLflow's system tables (runs + their logged metrics) for the shared experiment\n",
+        "-- (its name is filled in by build_dashboard.py --experiment, i.e. var.experiment_path).\n",
         "WITH runs AS (\n",
         "  SELECT r.run_id, r.experiment_id, r.run_name, r.start_time, r.tags, r.params, r.aggregated_metrics\n",
         "  FROM system.mlflow.runs_latest r\n",
@@ -211,7 +213,8 @@
       "displayName": "SJ Global: original vs reworded questions",
       "queryLines": [
         "-- Shared CTEs, prepended to every dataset query by build_dashboard.py.\n",
-        "-- Source: MLflow's system tables (runs + their logged metrics) for the shared experiment.\n",
+        "-- Source: MLflow's system tables (runs + their logged metrics) for the shared experiment\n",
+        "-- (its name is filled in by build_dashboard.py --experiment, i.e. var.experiment_path).\n",
         "WITH runs AS (\n",
         "  SELECT r.run_id, r.experiment_id, r.run_name, r.start_time, r.tags, r.params, r.aggregated_metrics\n",
         "  FROM system.mlflow.runs_latest r\n",
@@ -288,7 +291,8 @@
       "displayName": "BlueSky: agent vs each MyGPT config",
       "queryLines": [
         "-- Shared CTEs, prepended to every dataset query by build_dashboard.py.\n",
-        "-- Source: MLflow's system tables (runs + their logged metrics) for the shared experiment.\n",
+        "-- Source: MLflow's system tables (runs + their logged metrics) for the shared experiment\n",
+        "-- (its name is filled in by build_dashboard.py --experiment, i.e. var.experiment_path).\n",
         "WITH runs AS (\n",
         "  SELECT r.run_id, r.experiment_id, r.run_name, r.start_time, r.tags, r.params, r.aggregated_metrics\n",
         "  FROM system.mlflow.runs_latest r\n",
@@ -371,7 +375,8 @@
       "displayName": "Scorer agreement with St. Jude SMEs",
       "queryLines": [
         "-- Shared CTEs, prepended to every dataset query by build_dashboard.py.\n",
-        "-- Source: MLflow's system tables (runs + their logged metrics) for the shared experiment.\n",
+        "-- Source: MLflow's system tables (runs + their logged metrics) for the shared experiment\n",
+        "-- (its name is filled in by build_dashboard.py --experiment, i.e. var.experiment_path).\n",
         "WITH runs AS (\n",
         "  SELECT r.run_id, r.experiment_id, r.run_name, r.start_time, r.tags, r.params, r.aggregated_metrics\n",
         "  FROM system.mlflow.runs_latest r\n",
@@ -459,7 +464,8 @@
       "displayName": "Headline metrics per full eval run",
       "queryLines": [
         "-- Shared CTEs, prepended to every dataset query by build_dashboard.py.\n",
-        "-- Source: MLflow's system tables (runs + their logged metrics) for the shared experiment.\n",
+        "-- Source: MLflow's system tables (runs + their logged metrics) for the shared experiment\n",
+        "-- (its name is filled in by build_dashboard.py --experiment, i.e. var.experiment_path).\n",
         "WITH runs AS (\n",
         "  SELECT r.run_id, r.experiment_id, r.run_name, r.start_time, r.tags, r.params, r.aggregated_metrics\n",
         "  FROM system.mlflow.runs_latest r\n",
@@ -542,7 +548,8 @@
       "displayName": "Eval + reference runs",
       "queryLines": [
         "-- Shared CTEs, prepended to every dataset query by build_dashboard.py.\n",
-        "-- Source: MLflow's system tables (runs + their logged metrics) for the shared experiment.\n",
+        "-- Source: MLflow's system tables (runs + their logged metrics) for the shared experiment\n",
+        "-- (its name is filled in by build_dashboard.py --experiment, i.e. var.experiment_path).\n",
         "WITH runs AS (\n",
         "  SELECT r.run_id, r.experiment_id, r.run_name, r.start_time, r.tags, r.params, r.aggregated_metrics\n",
         "  FROM system.mlflow.runs_latest r\n",

@@ -48,6 +48,13 @@ PRIVATE_REPO = os.path.join("reference", "MyGPT-evaluations-private-main", "grou
 # on Databricks. Locally (tests) the submodule's own PDF folders are used instead.
 DOCS_VOLUME = "/Volumes/structural_biology/mygpt/docs"
 
+
+def configure(docs_volume: str = "", private_volume: str = "") -> None:
+    """Point at the deployment's volumes (the jobs pass the bundle's catalog/schema/volume names)."""
+    global DOCS_VOLUME, PRIVATE_VOLUME
+    DOCS_VOLUME = docs_volume or DOCS_VOLUME
+    PRIVATE_VOLUME = private_volume or PRIVATE_VOLUME
+
 # MyGPT-evaluations' `maximum_chunks_count` for both use cases (BioASQ uses 15).
 K = 10
 K_BIOASQ = 15

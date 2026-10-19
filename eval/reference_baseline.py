@@ -165,6 +165,9 @@ def main() -> None:
     ap.add_argument("--experiment", default="/Shared/mygpt/mygpt-rag-agent")
     ap.add_argument("--judge", default="true", help="false = code scorers only (no LLM judge calls)")
     ap.add_argument("--workers", type=int, default=4)
+    # Full /Volumes paths of the deployment's docs / private ground-truth volumes ("" = defaults).
+    ap.add_argument("--docs-volume", default="")
+    ap.add_argument("--private-volume", default="")
     ap.add_argument("--base-dir", default="")
     args = ap.parse_args()
 
@@ -174,6 +177,7 @@ def main() -> None:
     import mlflow
     import pandas as pd
 
+    eval_datasets.configure(args.docs_volume, args.private_volume)
     if eval_datasets.private_dir(base) is None:
         print("[reference] St. Jude's private ground truths not found — BioASQ only")
     judge = args.judge.strip().lower() == "true"

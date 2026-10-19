@@ -7,7 +7,43 @@ bundle:
 #   warehouse_id   ← the serverless SQL warehouse used by the ETL
 # The app was first created outside this bundle; bind it once before the first deploy:
 #   databricks bundle deployment bind app st-jude-mygpt -p mygpt
+# (renaming var.app_name creates a NEW app — re-bind or delete the old one.)
+#
+# Every resource name below is a variable. The current deployment's values live in
+# .databricks/bundle/default/variable-overrides.json (gitignored; `make config` installs it from
+# variable-overrides.example.json). Keys shared with the platform bundle (catalog, schema,
+# uploads_volume, endpoint names, the Lakebase branch) must match there — see DEPLOYMENT.md.
 variables:
+  app_name:
+    description: Databricks App name (also its URL slug).
+    default: st-jude-mygpt
+  app_description:
+    description: Databricks App description.
+    default: "St. Jude MyGPT — governed research assistant (POC)"
+  catalog:
+    description: UC catalog holding the MyGPT schema (= platform var.catalog).
+    default: structural_biology
+  schema:
+    description: UC schema of the corpus tables and volumes (= platform var.schema).
+    default: mygpt
+  uploads_volume:
+    description: Upload-library volume in catalog.schema (= platform var.uploads_volume).
+    default: uploads
+  fm_sonnet:
+    description: FMAPI endpoint for direct (non-grounded) chat — the default model.
+    default: databricks-claude-sonnet-5
+  fm_llama:
+    description: FMAPI llama endpoint for direct chat.
+    default: databricks-llama-4-maverick
+  fm_gptoss:
+    description: FMAPI gpt-oss endpoint for direct chat.
+    default: databricks-gpt-oss-120b
+  supervisor_endpoint:
+    description: The MyGPT Supervisor endpoint, the grounded path (= platform var.supervisor_endpoint).
+    default: mygpt-supervisor
+  embeddings_gateway:
+    description: AI Gateway embeddings endpoint for upload-library search (= platform var.embeddings_gateway).
+    default: mygpt-embeddings
   warehouse_id:
     description: SQL warehouse for the section catalogue (CAN_USE).
     default: ""
@@ -18,14 +54,14 @@ variables:
     description: Experiment id of /Shared/mygpt/mygpt-rag-agent (feedback assessments).
     default: ""
   pg_branch:
-    description: Lakebase branch holding the app state.
+    description: Lakebase branch holding the app state (projects/<platform var.pg_project>/branches/production).
     default: projects/mygpt/branches/production
 
 resources:
   apps:
     app:
-      name: "st-jude-mygpt"
-      description: "St. Jude MyGPT — governed research assistant (POC)"
+      name: ${var.app_name}
+      description: ${var.app_description}
       source_code_path: ./
 
       # Start the app automatically on deploy.
@@ -45,23 +81,23 @@ resources:
       resources:
         - name: serving-endpoint
           serving_endpoint:
-            name: databricks-claude-sonnet-5
+            name: ${var.fm_sonnet}
             permission: CAN_QUERY
         - name: serving-endpoint-llama
           serving_endpoint:
-            name: databricks-llama-4-maverick
+            name: ${var.fm_llama}
             permission: CAN_QUERY
         - name: serving-endpoint-gptoss
           serving_endpoint:
-            name: databricks-gpt-oss-120b
+            name: ${var.fm_gptoss}
             permission: CAN_QUERY
         - name: agent-endpoint
           serving_endpoint:
-            name: mygpt-supervisor
+            name: ${var.supervisor_endpoint}
             permission: CAN_QUERY
         - name: embeddings-endpoint
           serving_endpoint:
-            name: mygpt-embeddings
+            name: ${var.embeddings_gateway}
             permission: CAN_QUERY
         - name: postgres
           postgres:
@@ -70,12 +106,12 @@ resources:
             permission: CAN_CONNECT_AND_CREATE
         - name: uploads-volume
           uc_securable:
-            securable_full_name: structural_biology.mygpt.uploads
+            securable_full_name: ${var.catalog}.${var.schema}.${var.uploads_volume}
             securable_type: VOLUME
             permission: WRITE_VOLUME
         - name: paper-sections
           uc_securable:
-            securable_full_name: structural_biology.mygpt.paper_sections
+            securable_full_name: ${var.catalog}.${var.schema}.paper_sections
             securable_type: TABLE
             permission: SELECT
         - name: upload-job

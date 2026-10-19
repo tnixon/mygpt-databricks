@@ -2,17 +2,22 @@
 
 Edit the SQL in dashboards/sql/ and the layout here, then re-run:
 
-    python3 dashboards/build_dashboard.py
+    python3 dashboards/build_dashboard.py [--experiment <var.experiment_path>]
+
+The dashboard JSON is static, so after changing the bundle's `experiment_path` variable re-run
+this with the new path and redeploy.
 
 Every dataset is `sql/base.sql` (shared CTEs over the MLflow system tables) + `sql/<name>.sql`,
 so the benchmark mapping lives in one place. Don't hand-edit the generated JSON.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+EXPERIMENT = "/Shared/mygpt/mygpt-rag-agent"  # = databricks.yml var.experiment_path
 OUT = os.path.join(HERE, "mygpt_benchmarks.lvdash.json")
 
 DATASETS = {
@@ -33,9 +38,9 @@ GREEN, RED, AMBER = "#C8E6C9", "#FFCDD2", "#FFF3C4"
 PARAMETERS = {"scorecard": [("tolerance_pct", "Tolerance (%)", "DECIMAL", "3")]}
 
 
-def dataset(name: str) -> dict:
+def dataset(name: str, experiment: str) -> dict:
     with open(os.path.join(HERE, "sql", "base.sql")) as f:
-        base = f.read().rstrip("\n")
+        base = f.read().rstrip("\n").replace("{experiment}", experiment)
     with open(os.path.join(HERE, "sql", f"{name}.sql")) as f:
         body = f.read().rstrip("\n")
     ds = {"name": name, "displayName": DATASETS[name], "queryLines": [line + "\n" for line in (base + "\n" + body).split("\n")]}
@@ -195,7 +200,7 @@ Every **full** eval run (smoke runs with `max_rows` > 0 are excluded). Gold metr
 Use the filters to pick a dataset and metrics."""
 
 
-def build() -> dict:
+def build(experiment: str = EXPERIMENT) -> dict:
     p1 = [
         text("header", HEADER, 0, 0, 6, 3),
         counter("c_at_or_above", "scorecard", "is_at_or_above", "Benchmarks at or above MyGPT", 0, 3),
@@ -259,7 +264,7 @@ def build() -> dict:
         ], (0, 13, 6, 8)),
     ]
     return {
-        "datasets": [dataset(n) for n in DATASETS],
+        "datasets": [dataset(n, experiment) for n in DATASETS],
         "pages": [
             {"name": "scorecard", "displayName": "Scorecard", "pageType": "PAGE_TYPE_CANVAS", "layout": p1},
             {"name": "robustness_trust", "displayName": "Robustness & trust", "pageType": "PAGE_TYPE_CANVAS", "layout": p2},
@@ -269,7 +274,10 @@ def build() -> dict:
 
 
 if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--experiment", default=EXPERIMENT)
+    args = ap.parse_args()
     with open(OUT, "w") as f:
-        json.dump(build(), f, indent=2, ensure_ascii=False)
+        json.dump(build(args.experiment), f, indent=2, ensure_ascii=False)
         f.write("\n")
     print(f"wrote {OUT}")

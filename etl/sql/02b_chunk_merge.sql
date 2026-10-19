@@ -1,49 +1,54 @@
 -- MyGPT ingest — section-aware chunk, then MERGE into the AI Search source table.
 -- Runs after 02_parse_chunk_index.sql (parse -> _doc_elements_stage) and etl/parse_fallback.py
 -- (Phase 6: PyMuPDF elements for garbled / script-less documents). Steps 4-9 of the
--- pre-Phase-6 02, unchanged apart from the doc_parse_quality cleanup. Catalog: structural_biology.
+-- pre-Phase-6 02, unchanged apart from the doc_parse_quality cleanup. Catalog / schema: the
+-- job's `catalog` / `schema` parameters.
+
+-- Job parameters (databricks.yml sql_task.parameters): catalog, schema, docs_volume.
+USE CATALOG IDENTIFIER(:catalog);
+USE SCHEMA IDENTIFIER(:schema);
 
 -- 4) Apply element changes: drop elements of re-parsed and out-of-scope (removed file /
 --    dropped corpus) documents, then add the freshly parsed ones.
-DELETE FROM structural_biology.mygpt.doc_elements
-WHERE doc_id IN (SELECT doc_id FROM structural_biology.mygpt._docs_to_parse)
-   OR doc_id NOT IN (SELECT doc_id FROM structural_biology.mygpt._docs_in_scope);
+DELETE FROM doc_elements
+WHERE doc_id IN (SELECT doc_id FROM _docs_to_parse)
+   OR doc_id NOT IN (SELECT doc_id FROM _docs_in_scope);
 
-INSERT INTO structural_biology.mygpt.doc_elements
+INSERT INTO doc_elements
   (doc_id, path, corpus, idx, elem_type, page, content, header_text, section)
 SELECT doc_id, path, corpus, idx, elem_type, page, content, header_text, section
-FROM structural_biology.mygpt._doc_elements_stage;
+FROM _doc_elements_stage;
 
 -- Record the parsed versions (n_elements = 0 still counts as parsed, so a document that
 -- yields no elements isn't re-parsed every run) and forget out-of-scope documents.
-MERGE INTO structural_biology.mygpt.doc_parse_log t
+MERGE INTO doc_parse_log t
 USING (
   SELECT p.doc_id, p.path, p.corpus, p.size_bytes, p.modification_time,
          current_timestamp() AS parsed_at, count(e.idx) AS n_elements
-  FROM structural_biology.mygpt._docs_to_parse p
-  LEFT JOIN structural_biology.mygpt._doc_elements_stage e ON e.doc_id = p.doc_id
+  FROM _docs_to_parse p
+  LEFT JOIN _doc_elements_stage e ON e.doc_id = p.doc_id
   GROUP BY p.doc_id, p.path, p.corpus, p.size_bytes, p.modification_time
 ) s
 ON t.doc_id = s.doc_id
 WHEN MATCHED THEN UPDATE SET *
 WHEN NOT MATCHED THEN INSERT *;
 
-DELETE FROM structural_biology.mygpt.doc_parse_log
-WHERE doc_id NOT IN (SELECT doc_id FROM structural_biology.mygpt._docs_in_scope);
+DELETE FROM doc_parse_log
+WHERE doc_id NOT IN (SELECT doc_id FROM _docs_in_scope);
 
-DELETE FROM structural_biology.mygpt.doc_parse_quality
-WHERE doc_id NOT IN (SELECT doc_id FROM structural_biology.mygpt._docs_in_scope);
+DELETE FROM doc_parse_quality
+WHERE doc_id NOT IN (SELECT doc_id FROM _docs_in_scope);
 
 -- 5) Re-derive ALL chunks from doc_elements (cheap SQL, and deterministic: unchanged
 --    documents keep identical elements, so they produce identical chunks).
 --    ~1000-char, section-bounded chunks (no overlap).
-CREATE OR REPLACE TABLE structural_biology.mygpt._doc_chunks_stage AS
+CREATE OR REPLACE TABLE _doc_chunks_stage AS
 WITH body AS (
   -- keep substantive body text; drop headers themselves and tiny noise
   SELECT
     doc_id, path, corpus, idx, page, section, content,
     regexp_extract(path, '([^/]+)$', 1) AS source_name
-  FROM structural_biology.mygpt.doc_elements
+  FROM doc_elements
   WHERE length(content) >= 80
     AND lower(elem_type) NOT IN ('page_header', 'page_footer', 'page_number')
 ),
@@ -89,8 +94,8 @@ FROM chunks
 WHERE length(chunk_text) >= 80;
 
 -- 6) MERGE into the index source: only real changes touch the change feed.
-MERGE INTO structural_biology.mygpt.doc_chunks t
-USING structural_biology.mygpt._doc_chunks_stage s
+MERGE INTO doc_chunks t
+USING _doc_chunks_stage s
 ON t.chunk_id = s.chunk_id
 WHEN MATCHED AND NOT (
       t.chunk_text  <=> s.chunk_text
@@ -107,20 +112,20 @@ WHEN NOT MATCHED BY SOURCE THEN DELETE;
 --    document/section focus selector and the agent's section validation.
 --    'mygpt' (the app's default, unfiltered view) spans every corpus; each corpus
 --    also gets its own rows so per-corpus focus selectors can list just its sections.
-CREATE OR REPLACE TABLE structural_biology.mygpt.paper_sections AS
+CREATE OR REPLACE TABLE paper_sections AS
 SELECT 'mygpt' AS dataset_name, section AS section_title, count(*) AS section_count
-FROM structural_biology.mygpt.doc_chunks
+FROM doc_chunks
 GROUP BY section
 UNION ALL
 SELECT corpus AS dataset_name, section AS section_title, count(*) AS section_count
-FROM structural_biology.mygpt.doc_chunks
+FROM doc_chunks
 GROUP BY corpus, section;
 
 -- 8) Drop per-run staging.
-DROP TABLE IF EXISTS structural_biology.mygpt._docs_in_scope;
-DROP TABLE IF EXISTS structural_biology.mygpt._docs_to_parse;
-DROP TABLE IF EXISTS structural_biology.mygpt._doc_elements_stage;
-DROP TABLE IF EXISTS structural_biology.mygpt._doc_chunks_stage;
+DROP TABLE IF EXISTS _docs_in_scope;
+DROP TABLE IF EXISTS _docs_to_parse;
+DROP TABLE IF EXISTS _doc_elements_stage;
+DROP TABLE IF EXISTS _doc_chunks_stage;
 
 -- 9) Vector Search endpoint + Delta Sync index (MANAGED embeddings via the custom
 --    bge-m3 endpoint). `section` and (Phase 2) `corpus` are synced so the agent can
@@ -141,12 +146,12 @@ DROP TABLE IF EXISTS structural_biology.mygpt._doc_chunks_stage;
 --    endpoint. Revisit if the "AI Query for Custom Models and External Models" preview lands.
 --
 --    databricks vector-search-indexes create-index --profile mygpt --json '{
---      "name": "structural_biology.mygpt.doc_chunks_corpus_index",
+--      "name": "<catalog>.<schema>.doc_chunks_corpus_index",
 --      "endpoint_name": "mygpt-vs",
 --      "primary_key": "chunk_id",
 --      "index_type": "DELTA_SYNC",
 --      "delta_sync_index_spec": {
---        "source_table": "structural_biology.mygpt.doc_chunks",
+--        "source_table": "<catalog>.<schema>.doc_chunks",
 --        "pipeline_type": "TRIGGERED",
 --        "embedding_source_columns": [
 --          {"name": "chunk_text", "embedding_model_endpoint_name": "mygpt-bge-m3"}

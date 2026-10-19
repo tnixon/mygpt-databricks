@@ -1,30 +1,50 @@
 # MyGPT on Databricks — POC monorepo
 # Common tasks. Run `make help` to list targets.
-# Override the target workspace with PROFILE=<name> (default: stjude-mygpt).
+# Override the target workspace with PROFILE=<name> (default: mygpt).
+# Names / ids come from the bundles' variable-overrides.json (`make config`); see DEPLOYMENT.md.
 # The app standardizes on pnpm — see app/package.json `packageManager`
 # (pnpm@11.0.8, provisioned via corepack) + app/pnpm-workspace.yaml. Don't run
 # `npm install` in app/ (it would re-create package-lock.json and diverge from
 # the pnpm-lock.yaml the Databricks Apps build compute installs from).
 
-PROFILE ?= stjude-mygpt
+PROFILE ?= mygpt
 APP_DIR := app
+BUNDLE_CFG := python3 -I scripts/bundle_config.py
+# $(call ovr,<key>): the platform bundle's value for <key> (overrides file, else its default).
+ovr = $(shell $(BUNDLE_CFG) get $(1))
+
+# UC location of the volumes below (= the platform bundle's catalog / schema / *_volume).
+CATALOG ?= $(call ovr,catalog)
+SCHEMA ?= $(call ovr,schema)
 
 # Phase-2 eval corpora: one docs-volume folder per corpus (= the agent's custom_inputs.corpus).
-DOCS_VOLUME := dbfs:/Volumes/structural_biology/mygpt/docs
+DOCS_VOLUME = dbfs:/Volumes/$(CATALOG)/$(SCHEMA)/$(call ovr,docs_volume)
 EVAL_INPUTS := reference/MyGPT-evaluations
 # St. Jude's private ground truths (gitignored) -> the restricted eval_private UC volume.
 EVAL_PRIVATE := reference/MyGPT-evaluations-private-main/ground truths
-PRIVATE_VOLUME := dbfs:/Volumes/structural_biology/mygpt/eval_private
+PRIVATE_VOLUME = dbfs:/Volumes/$(CATALOG)/$(SCHEMA)/$(call ovr,eval_private_volume)
 KINASE_PDFS ?=   # dir of St. Jude's kinase PDFs, named <pubmed_id>.pdf (not in the submodule)
 
 .DEFAULT_GOAL := help
 
-.PHONY: help init submodules submodules-update install dev build typecheck lint test validate deploy clean eval-corpus corpus-hi eval-private eval-test
+.PHONY: help init config config-check sync-ids submodules submodules-update install dev build typecheck lint test \
+	validate deploy deploy-platform deploy-app app-run bootstrap secrets vs-index gateways agents summary app-logs \
+	clean eval-corpus corpus-hi eval-private eval-test
+# Job chains (gateways, agents) must run in order, and deploy-platform must finish first.
+.NOTPARALLEL:
 
 help: ## List available targets
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z_%-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 init: submodules install ## First-time setup: fetch submodules + install app deps
+
+# The bundle CLI reads .databricks/bundle/<target>/variable-overrides.json (gitignored, per checkout).
+config: ## Install both bundles' variable-overrides.json from the committed examples (never overwrites)
+	@for d in . $(APP_DIR); do \
+	  f=$$d/.databricks/bundle/default/variable-overrides.json; \
+	  if [ -f $$f ]; then echo "kept      $$f"; \
+	  else mkdir -p $$(dirname $$f) && cp $$d/variable-overrides.example.json $$f && echo "installed $$f"; fi; \
+	done
 
 submodules: ## Fetch/init reference submodules (stjude/MyGPT, MyGPT-evaluations)
 	git submodule update --init --recursive
@@ -51,11 +71,54 @@ lint: ## Lint the app
 test: ## Run app tests
 	cd $(APP_DIR) && pnpm test
 
-validate: ## Validate the app before deploy (PROFILE=<name>)
-	cd $(APP_DIR) && databricks apps validate --profile $(PROFILE)
+# ---------------------------------------------------------------- deployment (DEPLOYMENT.md)
+# Both bundles: platform (repo root) owns the jobs / volumes / Lakebase, app/ owns the App.
+config-check: ## Check the app overrides agree with the platform's (shared names, Lakebase branch, ids)
+	@$(BUNDLE_CFG) check
 
-deploy: ## Deploy the app to the workspace (PROFILE=<name>)
-	cd $(APP_DIR) && databricks apps deploy --profile $(PROFILE)
+sync-ids: ## Copy shared names + the deployed upload-job / experiment ids into the app overrides (after deploy-platform)
+	$(BUNDLE_CFG) sync-ids --profile $(PROFILE)
+
+validate: ## Validate both bundles (PROFILE=<name>)
+	databricks bundle validate -p $(PROFILE)
+	cd $(APP_DIR) && databricks bundle validate -p $(PROFILE)
+
+deploy: deploy-platform deploy-app ## Deploy both bundles (PROFILE=<name>)
+
+deploy-platform: ## Deploy the platform bundle: jobs, volumes, Lakebase, experiment, dashboard (step 2)
+	databricks bundle deploy -p $(PROFILE)
+
+deploy-app: config-check ## Deploy the app bundle (its resources + source; `app-run` restarts it on the new code)
+	cd $(APP_DIR) && databricks bundle deploy -p $(PROFILE)
+
+app-run: deploy-app ## Deploy the app bundle, then (re)start the app on the new code (step 12)
+	cd $(APP_DIR) && databricks bundle run app -p $(PROFILE)
+
+# `bundle run` executes the last-DEPLOYED code, so every run deploys the platform bundle first
+# (once per make invocation): make run-etl, make run-deploy_agent, make run-eval_monitor, ...
+run-%: deploy-platform ## Deploy the platform bundle, then run job mygpt_<%> (e.g. run-etl, run-deploy_agent)
+	databricks bundle run mygpt_$* -p $(PROFILE)
+
+gateways: run-deploy_gateway run-deploy_chat_gateway run-deploy_translate_gateway ## Deploy the 3 AI Gateway endpoints (step 5; needs `secrets`)
+
+agents: run-deploy_tools run-deploy_genie run-deploy_supervisor ## Deploy the tools, Genie space and Supervisor, in order (step 11)
+
+bootstrap: ## One-time: schema + docs volume, experiment folder, secret scope (step 1; needs warehouse_id)
+	$(BUNDLE_CFG) bootstrap --profile $(PROFILE)
+
+secrets: ## Store the gateway upstream token, prompted (step 4; AZURE=1 also stores the Azure AI Foundry key)
+	databricks secrets put-secret $(call ovr,secret_scope) $(call ovr,gw_token_secret_key) -p $(PROFILE)
+	@if [ -n "$(AZURE)" ]; then databricks secrets put-secret $(call ovr,secret_scope) $(call ovr,azure_key_secret_key) -p $(PROFILE); fi
+
+vs-index: ## One-time: create the Vector Search endpoint + corpus index, waiting for ONLINE (step 8)
+	$(BUNDLE_CFG) vs-index --profile $(PROFILE)
+
+summary: ## Show both bundles' deployed resources (ids, URLs)
+	databricks bundle summary -p $(PROFILE)
+	cd $(APP_DIR) && databricks bundle summary -p $(PROFILE)
+
+app-logs: ## Show the app's recent logs (APP_LINES=<n>, default 200; FOLLOW=1 keeps streaming)
+	databricks apps logs $(shell $(BUNDLE_CFG) get app_name --app) --tail-lines $(or $(APP_LINES),200) $(if $(FOLLOW),-f) -p $(PROFILE)
 
 clean: ## Remove app build artifacts + node_modules
 	cd $(APP_DIR) && pnpm run clean

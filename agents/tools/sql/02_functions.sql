@@ -1,9 +1,10 @@
 -- MyGPT Phase 5 — domain tools as Unity Catalog functions, served by managed MCP:
---   /api/2.0/mcp/functions/structural_biology/mygpt_tools
+--   /api/2.0/mcp/functions/<catalog>/<tools_schema>
 -- Ports MyGPT's FastMCP tools (reference/MyGPT/MCP-server/mygpt_backend.py). Every function
--- in this schema becomes an MCP tool named structural_biology__mygpt_tools__<fn>; its
+-- in this schema becomes an MCP tool named <catalog>__<tools_schema>__<fn>; its
 -- description and argument schema come from the COMMENTs, so write them for the LLM.
--- A dedicated schema keeps helper / ETL objects in `mygpt` out of the tool list.
+-- A dedicated schema keeps helper / ETL objects in `<schema>` out of the tool list.
+-- Job parameters (databricks.yml sql_task.parameters): catalog, schema, tools_schema.
 --
 -- Outputs are compact JSON strings: the Supervisor passes them to the LLM verbatim, and
 -- raw API payloads waste its tokens. RCSB answers HTTP 204 (empty body) on zero hits.
@@ -11,14 +12,16 @@
 -- list_corpora / list_corpus_documents below; upload libraries live in Lakebase under RLS,
 -- so the app hands them to the Supervisor instead (custom_inputs.libraries).
 
-CREATE SCHEMA IF NOT EXISTS structural_biology.mygpt_tools
+USE CATALOG IDENTIFIER(:catalog);
+CREATE SCHEMA IF NOT EXISTS IDENTIFIER(:tools_schema)
   COMMENT 'MyGPT Phase 5: domain tools exposed to the Supervisor through managed MCP';
+USE SCHEMA IDENTIFIER(:tools_schema);
 
 -- --------------------------------------------------------------------------- PubMed
 -- Port of get_pubmed_id_from_question. MyGPT matched bare 8-digit numbers only, which
 -- misses older 7-digit PMIDs; explicit "PMID"/"PubMed" mentions accept 1-8 digits.
 -- agents/tools/test_tools.py executes this body.
-CREATE OR REPLACE FUNCTION structural_biology.mygpt_tools.pubmed_ids_from_text(
+CREATE OR REPLACE FUNCTION pubmed_ids_from_text(
   text STRING COMMENT 'Free text that may mention PubMed ids, e.g. a user question or a citation list')
 RETURNS ARRAY<STRING>
 LANGUAGE PYTHON
@@ -36,7 +39,7 @@ for m in re.finditer(r"(?:\bPMID\s*:?\s*|\bPubMed(?:\s+ID)?\s*:?\s*|pubmed\.ncbi
 return found
 $$;
 
-CREATE OR REPLACE FUNCTION structural_biology.mygpt_tools.pubmed_summary(
+CREATE OR REPLACE FUNCTION pubmed_summary(
   pmids STRING COMMENT 'One or more PubMed ids separated by commas, e.g. 10498895,10838079 (at most 20)')
 RETURNS STRING
 COMMENT 'Look up papers in PubMed by id: returns JSON [{pubmed_id, title, journal, pubdate, authors (first 6), doi}]. Ids PubMed does not know are omitted. Use it to name, date or cite a paper; it does not return the paper text.'
@@ -66,7 +69,7 @@ RETURN (
 -- structures of the protein ("ABL1 kinase" = 4,448 text matches vs 74 human ABL1 entries),
 -- and the LLM reported the text count as a structure count. The gene search is the
 -- precise one; full text says what its count means.
-CREATE OR REPLACE FUNCTION structural_biology.mygpt_tools.search_pdb_by_gene(
+CREATE OR REPLACE FUNCTION search_pdb_by_gene(
   gene STRING COMMENT 'Gene symbol of the protein, e.g. ABL1, MAPK14, EGFR',
   organism STRING DEFAULT 'Homo sapiens' COMMENT 'Source organism scientific name; default Homo sapiens')
 RETURNS STRING
@@ -105,7 +108,7 @@ RETURN (
   FROM hits
 );
 
-CREATE OR REPLACE FUNCTION structural_biology.mygpt_tools.search_pdb(
+CREATE OR REPLACE FUNCTION search_pdb(
   query STRING COMMENT 'Free text, e.g. a ligand, drug, disease or method: imatinib, cryo-EM spliceosome')
 RETURNS STRING
 COMMENT 'Full-text search of the RCSB Protein Data Bank: returns JSON {text_matches, entries: [{rcsb_id, title, method, resolution_A, released}]} for the 10 most relevant entries. text_matches counts entries whose text MENTIONS the query, not structures of that protein; use search_pdb_by_gene for structures of a protein.'
@@ -139,7 +142,7 @@ RETURN (
 
 -- Port of get_pdb_details, plus the molecules, ligands and primary citation (whose PubMed
 -- id chains into pubmed_summary).
-CREATE OR REPLACE FUNCTION structural_biology.mygpt_tools.get_pdb_details(
+CREATE OR REPLACE FUNCTION get_pdb_details(
   pdb_id STRING COMMENT 'Four-character PDB id, e.g. 2HYY')
 RETURNS STRING
 COMMENT 'Details of one RCSB Protein Data Bank entry: returns JSON with title, experimental method, resolution, release date, the macromolecules (name, organism, gene), bound ligands (id, name) and the primary citation (title, PubMed id, DOI). Returns null when the id does not exist.'
@@ -156,28 +159,32 @@ RETURN get_json_object(
 
 -- --------------------------------------------------------------------------- governed corpora
 -- Governed side of get_mygpt_datasets / get_mygpt_documents (corpus_documents is built by
--- etl/structured_seed.py).
-CREATE OR REPLACE FUNCTION structural_biology.mygpt_tools.list_corpora()
+-- etl/structured_seed.py). A SQL function body resolves unqualified names against the catalog /
+-- schema current when it is CREATEd, so switch to the data schema and name the functions into
+-- the tools schema explicitly.
+USE SCHEMA IDENTIFIER(:schema);
+
+CREATE OR REPLACE FUNCTION IDENTIFIER(:tools_schema || '.list_corpora')()
 RETURNS TABLE (corpus STRING, documents BIGINT, indexed_documents BIGINT)
 COMMENT 'List the governed document collections (corpora) MyGPT can search, with how many documents each holds and how many are indexed. biomed = BioASQ biomedical papers, kinase_literature = BlueSky kinase papers, health_policies_fr / health_policies_es = SJ Global health policies.'
 RETURN
   SELECT corpus, count(*), count_if(n_chunks > 0)
-  FROM structural_biology.mygpt.corpus_documents
+  FROM corpus_documents
   GROUP BY corpus
   ORDER BY corpus;
 
-CREATE OR REPLACE FUNCTION structural_biology.mygpt_tools.list_corpus_documents(
+CREATE OR REPLACE FUNCTION IDENTIFIER(:tools_schema || '.list_corpus_documents')(
   corpus STRING COMMENT 'Corpus name from list_corpora, e.g. kinase_literature')
 RETURNS TABLE (source_name STRING, indexed_chunks BIGINT)
 COMMENT 'List the documents (file names) in one governed corpus, with their indexed chunk count, at most 500. Use the file names to focus document search on specific papers.'
 RETURN
   SELECT d.source_name, d.n_chunks
-  FROM structural_biology.mygpt.corpus_documents d
+  FROM corpus_documents d
   WHERE d.corpus = list_corpus_documents.corpus
   ORDER BY d.source_name
   LIMIT 500;
 
--- Sanity (through managed MCP the same calls are tools/call on structural_biology__mygpt_tools__<fn>):
---   SELECT structural_biology.mygpt_tools.search_pdb_by_gene('ABL1');
---   SELECT structural_biology.mygpt_tools.pubmed_summary('10498895,10838079');
---   SELECT * FROM structural_biology.mygpt_tools.list_corpora();
+-- Sanity (through managed MCP the same calls are tools/call on <catalog>__<tools_schema>__<fn>):
+--   SELECT <catalog>.<tools_schema>.search_pdb_by_gene('ABL1');
+--   SELECT <catalog>.<tools_schema>.pubmed_summary('10498895,10838079');
+--   SELECT * FROM <catalog>.<tools_schema>.list_corpora();
