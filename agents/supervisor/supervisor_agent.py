@@ -641,7 +641,8 @@ def _system_prompt(ci: dict, libs: list[dict]) -> str:
         desc = f" - {lib['description']}" if lib["description"] else ""
         lines.append(f"- {lib['key']}: {lib['name']!r} ({kind}, {lib['documents_language']}){desc}")
     head = ("The user selected one library for document search:" if len(libs) == 1
-            else "The user selected these libraries for document search (search_documents `libraries`):")
+            else "The user selected these libraries for document search (search_documents `libraries`; "
+                 "the keys are for the tool only: name libraries in your answer, never their keys):")
     return SYSTEM_PROMPT + "\n" + head + "\n" + "\n".join(lines)
 
 
