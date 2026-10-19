@@ -46,6 +46,8 @@ make help                # list all targets
 ```
 Override the workspace with `PROFILE=<name>` (default `mygpt`), e.g. `make deploy PROFILE=mygpt`.
 The full deployment sequence is in [DEPLOYMENT.md](DEPLOYMENT.md#deployment-steps-at-a-glance).
+Quickest path to a new workspace: edit both `variable-overrides.json` files, then
+run the commands in `deploy.sh` (plain databricks CLI, one per step; set `PROFILE` at the top).
 
 ## Scope
 Phase-1 POC: **grant-application use case, no PHI**, built in the sandbox. Design docs (architecture diagram, POC doc, repo insights, UX spec, design tokens) live in the FE project workspace.

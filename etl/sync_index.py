@@ -10,11 +10,14 @@ when a sync is requested. This task:
   3. checks indexed_row_count == count(doc_chunks), which catches silent embedding
      failures (e.g. the `mygpt-bge-m3` endpoint being down).
 
-Index CREATION stays a one-time API step (see the tail of etl/sql/02b_chunk_merge.sql).
+If the index doesn't exist yet (first ETL run), it is CREATED here instead: a TRIGGERED Delta
+Sync index on --endpoint (a bundle resource), embedding chunk_text through the
+--embedding-endpoint MODEL endpoint (AI Search rejects gateway endpoints). Its initial sync
+then plays the role of step 1, and steps 2-3 are unchanged.
 
 Usage:
     python etl/sync_index.py --index structural_biology.mygpt.doc_chunks_corpus_index \
-        --source-table structural_biology.mygpt.doc_chunks
+        --source-table structural_biology.mygpt.doc_chunks --endpoint mygpt-vs --embedding-endpoint mygpt-bge-m3
 """
 
 from __future__ import annotations
@@ -24,9 +27,42 @@ import sys
 import time
 
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.errors import NotFound
+from databricks.sdk.service.vectorsearch import (
+    DeltaSyncVectorIndexSpecRequest,
+    EmbeddingSourceColumn,
+    PipelineType,
+    VectorIndexType,
+)
 
 _TERMINAL = {"COMPLETED", "FAILED", "CANCELED"}
 _POLL_S = 15
+# Columns the agent reads back (agents/rag_agent/agent.py _retrieve) and filters on.
+_COLUMNS_TO_SYNC = ["chunk_id", "doc_id", "source_name", "corpus", "section", "page", "elem_type", "chunk_text"]
+
+
+def _create_index(w: WorkspaceClient, index: str, source_table: str, endpoint: str, embedding_endpoint: str,
+                  deadline: float) -> str:
+    """Create the index (waiting for its VS endpoint to be ONLINE first); returns its pipeline id."""
+    while (state := w.vector_search_endpoints.get_endpoint(endpoint).endpoint_status.state.value) != "ONLINE":
+        if time.time() > deadline:
+            raise TimeoutError(f"VS endpoint {endpoint} still {state}")
+        print(f"[sync] VS endpoint {endpoint} is {state}; waiting")
+        time.sleep(_POLL_S)
+    w.vector_search_indexes.create_index(
+        name=index, endpoint_name=endpoint, primary_key="chunk_id", index_type=VectorIndexType.DELTA_SYNC,
+        delta_sync_index_spec=DeltaSyncVectorIndexSpecRequest(
+            source_table=source_table, pipeline_type=PipelineType.TRIGGERED, columns_to_sync=_COLUMNS_TO_SYNC,
+            embedding_source_columns=[EmbeddingSourceColumn(name="chunk_text", embedding_model_endpoint_name=embedding_endpoint)],
+        ),
+    )
+    print(f"[sync] created {index} on {endpoint} (embeddings: {embedding_endpoint}); waiting for its initial sync")
+    # The backing pipeline id appears once the index has been provisioned.
+    while not (pipeline_id := w.vector_search_indexes.get_index(index).delta_sync_index_spec.pipeline_id):
+        if time.time() > deadline:
+            raise TimeoutError(f"index {index} has no pipeline yet")
+        time.sleep(_POLL_S)
+    return pipeline_id
 
 
 def _latest_update(w: WorkspaceClient, pipeline_id: str):
@@ -72,24 +108,31 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--index", required=True, help="catalog.schema.index")
     ap.add_argument("--source-table", required=True, help="catalog.schema.table the index syncs from")
+    ap.add_argument("--endpoint", required=True, help="VS endpoint to create the index on, if it's missing")
+    ap.add_argument("--embedding-endpoint", required=True, help="model serving endpoint embedding chunk_text")
     ap.add_argument("--timeout-min", type=int, default=60)
     args = ap.parse_args()
 
     w = WorkspaceClient()
     deadline = time.time() + args.timeout_min * 60
-    pipeline_id = w.vector_search_indexes.get_index(args.index).delta_sync_index_spec.pipeline_id
-    print(f"[sync] {args.index} (pipeline {pipeline_id})")
-
-    # A sync still running from an earlier trigger may predate this run's MERGE: let it
-    # finish, then trigger our own.
-    current = _latest_update(w, pipeline_id)
-    if current and _state(current) not in _TERMINAL:
-        print(f"[sync] update {current.update_id} already {_state(current)}; waiting for it first")
-        current = _wait_terminal(w, pipeline_id, None, deadline)
-
     started = time.time()
-    w.vector_search_indexes.sync_index(args.index)
-    update = _wait_terminal(w, pipeline_id, current.update_id if current else None, deadline)
+    try:
+        pipeline_id = w.vector_search_indexes.get_index(args.index).delta_sync_index_spec.pipeline_id
+    except NotFound:
+        # First run: the initial sync of the new index covers everything 02b MERGEd.
+        pipeline_id = _create_index(w, args.index, args.source_table, args.endpoint, args.embedding_endpoint, deadline)
+        update = _wait_terminal(w, pipeline_id, None, deadline)
+    else:
+        print(f"[sync] {args.index} (pipeline {pipeline_id})")
+        # A sync still running from an earlier trigger may predate this run's MERGE: let it
+        # finish, then trigger our own.
+        current = _latest_update(w, pipeline_id)
+        if current and _state(current) not in _TERMINAL:
+            print(f"[sync] update {current.update_id} already {_state(current)}; waiting for it first")
+            current = _wait_terminal(w, pipeline_id, None, deadline)
+        started = time.time()
+        w.vector_search_indexes.sync_index(args.index)
+        update = _wait_terminal(w, pipeline_id, current.update_id if current else None, deadline)
     print(f"[sync] update {update.update_id} {_state(update)} in {time.time() - started:.0f}s")
     if _state(update) != "COMPLETED":
         # e.g. DIFFERENT_DELTA_TABLE_READ_BY_STREAMING_SOURCE: the source table was replaced

@@ -23,11 +23,10 @@
 #   databricks bundle run mygpt_eval_monitor -p mygpt          # Phase 2: production monitoring
 #   (Phase 4) the app triggers mygpt_upload_ingest itself; see app/README.md for the order.
 #
-# NOTE 1: Vector Search index CREATION remains a one-time API step (see the tail of
-# etl/sql/02b_chunk_merge.sql); SYNCING it is the last task of mygpt_etl.
-# NOTE 2: mygpt_deploy_gateway needs a secret token with CAN QUERY on mygpt-bge-m3
-# (scope / key = var.secret_scope / var.gw_token_secret_key):
-#   databricks secrets create-scope mygpt --profile mygpt   # if absent
+# NOTE 1: the last task of mygpt_etl syncs the Vector Search index, creating it on the first
+# run (etl/sync_index.py); the VS endpoint itself is a bundle resource.
+# NOTE 2: mygpt_deploy_gateway needs a secret token with CAN QUERY on mygpt-bge-m3, in the
+# bundle-managed scope (scope / key = var.secret_scope / var.gw_token_secret_key):
 #   databricks secrets put-secret mygpt gw_upstream_token --profile mygpt
 
 bundle:
@@ -154,6 +153,28 @@ variables:
     default: azure_foundry_key
 
 resources:
+  # ---------------------------------------------------------------- foundations
+  # The catalog and schema must already exist (deploy.sh step 1 creates the schema; the
+  # catalog is admin-created). The corpus volume, secret scope and Vector Search endpoint are
+  # bundle-managed but protected: `bundle destroy` refuses to delete them (prevent_destroy) —
+  # they hold the corpus and the gateway credentials. Delete them by hand at teardown.
+  secret_scopes:
+    # Holds the gateways' upstream token (and the optional Azure AI Foundry key). The VALUES
+    # are put by hand: databricks secrets put-secret <secret_scope> <gw_token_secret_key>.
+    mygpt_secrets:
+      name: ${var.secret_scope}
+      lifecycle:
+        prevent_destroy: true
+
+  vector_search_endpoints:
+    # Serves the corpus index. The index itself is created by mygpt_etl's sync_index task
+    # (its source table, doc_chunks, only exists after the ETL's first run).
+    mygpt_vs:
+      name: ${var.vs_endpoint}
+      endpoint_type: STANDARD
+      lifecycle:
+        prevent_destroy: true
+
   # ---------------------------------------------------------------- Phase 4: Lakebase
   # App state (libraries, per-user upload index, history, feedback). Creating the project also
   # creates the `production` branch, its `primary` read-write endpoint and the default
@@ -169,6 +190,16 @@ resources:
         autoscaling_limit_max_cu: 4
 
   volumes:
+    # The governed corpus PDFs, one top-level folder per corpus (= the agent's custom_inputs.corpus).
+    docs:
+      catalog_name: ${var.catalog}
+      schema_name: ${var.schema}
+      name: ${var.docs_volume}
+      volume_type: MANAGED
+      comment: "Raw source documents (FILE EXTERNAL corpus)"
+      lifecycle:
+        prevent_destroy: true
+
     # Upload-library files, one folder per library (written by the app, read by mygpt_upload_ingest).
     uploads:
       catalog_name: ${var.catalog}
@@ -258,7 +289,8 @@ resources:
               schema: ${var.schema}
               docs_volume: ${var.docs_volume}
         # 02b MERGEs chunk changes into doc_chunks; sync the TRIGGERED index so they become
-        # searchable, and wait until it has caught up (fails on a row-count mismatch).
+        # searchable, and wait until it has caught up (fails on a row-count mismatch). Creates
+        # the index on the first run.
         - task_key: sync_index
           depends_on: [{ task_key: chunk_merge }]
           environment_key: default
@@ -266,7 +298,9 @@ resources:
             python_file: etl/sync_index.py
             parameters:
               ["--index", "${var.catalog}.${var.schema}.${var.vs_index}",
-               "--source-table", "${var.catalog}.${var.schema}.doc_chunks"]
+               "--source-table", "${var.catalog}.${var.schema}.doc_chunks",
+               "--endpoint", "${resources.vector_search_endpoints.mygpt_vs.name}",
+               "--embedding-endpoint", "${var.embedding_endpoint}"]
         # Phase 5: structured tables for Genie (kinome, kinase_papers, corpus_documents view).
         # After chunk_merge because the view counts doc_chunks.
         - task_key: structured_seed
