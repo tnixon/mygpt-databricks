@@ -60,6 +60,30 @@ def find_genie_space(w, title: str) -> str:
             raise SystemExit(f"Genie space {title!r} not found: run mygpt_deploy_genie first")
 
 
+def langsmith_env(w, args) -> dict[str, str]:
+    """Serving env vars that mirror the agent's traces to LangSmith, or {} when the API-key
+    secret doesn't exist (its presence is the on/off switch). Only the secret's NAME is read;
+    the endpoint resolves the {{secrets/...}} reference itself."""
+    keys = {s.key for s in w.secrets.list_secrets(args.secret_scope)}
+    if args.langsmith_secret_key not in keys:
+        print(f"LangSmith tracing off (no secret {args.secret_scope}/{args.langsmith_secret_key})")
+        return {}
+    env = {
+        "LANGSMITH_TRACING": "true",
+        "LANGSMITH_API_KEY": f"{{{{secrets/{args.secret_scope}/{args.langsmith_secret_key}}}}}",
+        "LANGSMITH_PROJECT": args.langsmith_project,
+        "LANGSMITH_ENDPOINT": args.langsmith_endpoint,
+    }
+    if args.langsmith_workspace_id:
+        env["LANGSMITH_WORKSPACE_ID"] = args.langsmith_workspace_id
+    if args.langsmith_hide_content.lower() == "true":
+        # Run tree, timings and metadata only; no questions, chunks or answers leave the workspace.
+        env["LANGSMITH_HIDE_INPUTS"] = env["LANGSMITH_HIDE_OUTPUTS"] = "true"
+    print(f"LangSmith tracing on (project {args.langsmith_project}"
+          f"{', content hidden' if 'LANGSMITH_HIDE_INPUTS' in env else ''})")
+    return env
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--catalog", default="structural_biology")
@@ -73,6 +97,13 @@ def main() -> None:
     ap.add_argument("--genie-title", default=GENIE_TITLE)
     # Same shared experiment as the RAG agent: LoggedModels, eval runs and production traces.
     ap.add_argument("--experiment", default="/Shared/mygpt/mygpt-rag-agent")
+    # Optional LangSmith mirror of the traces: on when the API-key secret exists (langsmith_env).
+    ap.add_argument("--secret-scope", default="mygpt")
+    ap.add_argument("--langsmith-secret-key", default="langsmith_api_key")
+    ap.add_argument("--langsmith-project", default="mygpt")
+    ap.add_argument("--langsmith-endpoint", default="https://api.smith.langchain.com")
+    ap.add_argument("--langsmith-workspace-id", default="")
+    ap.add_argument("--langsmith-hide-content", default="false")
     ap.add_argument("--base-dir", default="")
     args = ap.parse_args()
 
@@ -104,7 +135,8 @@ def main() -> None:
         "MYGPT_GENIE_SPACE_ID": space_id,
         "MYGPT_TOOLS_SCHEMA": tools_schema,
     }
-    # The log-time validation predict imports the agent in this process; give it the same config.
+    # The log-time validation predict imports the agent in this process; give it the same config
+    # (not the LangSmith vars: validation stays untraced, and only serving resolves secrets).
     os.environ.update(env)
 
     mlflow.set_registry_uri("databricks-uc")
@@ -129,7 +161,7 @@ def main() -> None:
         endpoint_name=args.endpoint_name,
         # Pin traces to the shared experiment (agents.deploy otherwise keeps whatever an
         # existing endpoint had; see the RAG driver).
-        environment_vars={**env, "MLFLOW_EXPERIMENT_ID": experiment_id},
+        environment_vars={**env, **langsmith_env(w, args), "MLFLOW_EXPERIMENT_ID": experiment_id},
         scale_to_zero_enabled=True,
     )
     print(f"Deploy requested for endpoint {args.endpoint_name}")

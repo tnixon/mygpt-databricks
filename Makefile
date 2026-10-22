@@ -28,7 +28,7 @@ KINASE_PDFS ?=   # dir of St. Jude's kinase PDFs, named <pubmed_id>.pdf (not in 
 .DEFAULT_GOAL := help
 
 .PHONY: help init config submodules submodules-update install dev build typecheck lint test \
-	validate deploy deploy-platform deploy-app app-run secrets gateways agents summary app-logs \
+	validate deploy deploy-platform deploy-app app-run secrets langsmith-secret gateways agents summary app-logs \
 	clean eval-corpus corpus-hi eval-private eval-test
 # Job chains (gateways, agents) must run in order, and deploy-platform must finish first.
 .NOTPARALLEL:
@@ -98,9 +98,16 @@ gateways: run-deploy_gateway run-deploy_chat_gateway run-deploy_translate_gatewa
 
 agents: run-deploy_tools run-deploy_genie run-deploy_supervisor ## Deploy the tools, Genie space and Supervisor, in order (step 11)
 
-secrets: ## Store the gateway upstream token, prompted (step 4; AZURE=1 also stores the Azure AI Foundry key)
+secrets: ## Store the gateway upstream token, prompted (step 4; AZURE=1 adds the Azure AI Foundry key, LANGSMITH=1 the LangSmith key)
 	databricks secrets put-secret $(SCOPE) gw_upstream_token -p $(PROFILE)
 	@if [ -n "$(AZURE)" ]; then databricks secrets put-secret $(SCOPE) azure_foundry_key -p $(PROFILE); fi
+	@if [ -n "$(LANGSMITH)" ]; then $(MAKE) --no-print-directory langsmith-secret; fi
+
+# The key goes over stdin (never argv). From .env when it has LANGSMITH_API_KEY, else prompted.
+langsmith-secret: ## Store the LangSmith API key (from .env, else prompted); redeploy both agents after
+	@key=$$(sed -n 's/^LANGSMITH_API_KEY=//p' .env 2>/dev/null | tail -1 | tr -d "\"'"); \
+	if [ -n "$$key" ]; then printf '%s' "$$key" | databricks secrets put-secret $(SCOPE) langsmith_api_key -p $(PROFILE) && echo "stored $(SCOPE)/langsmith_api_key from .env"; \
+	else databricks secrets put-secret $(SCOPE) langsmith_api_key -p $(PROFILE); fi
 
 summary: ## Show both bundles' deployed resources (ids, URLs)
 	databricks bundle summary -p $(PROFILE)

@@ -31,5 +31,10 @@
   "supervisor_endpoint": "mygpt-supervisor",
   "secret_scope": "mygpt",
   "gw_token_secret_key": "gw_upstream_token",
-  "azure_key_secret_key": "azure_foundry_key"
+  "azure_key_secret_key": "azure_foundry_key",
+  "langsmith_api_key_secret_key": "langsmith_api_key",
+  "langsmith_project": "mygpt",
+  "langsmith_endpoint": "https://api.smith.langchain.com",
+  "langsmith_workspace_id": "",
+  "langsmith_hide_content": "false"
 }

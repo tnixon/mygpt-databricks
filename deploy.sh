@@ -28,6 +28,8 @@ databricks bundle run mygpt_deploy_embedding -p $PROFILE
 
 # 4. Gateway upstream token (paste a service-principal token when prompted)
 databricks secrets put-secret $SCOPE gw_upstream_token -p $PROFILE
+# optional: the LangSmith API key turns on the agents' LangSmith trace mirror (steps 8, 9)
+# databricks secrets put-secret $SCOPE langsmith_api_key -p $PROFILE
 
 # 5. AI Gateway endpoints
 databricks bundle run mygpt_deploy_gateway -p $PROFILE

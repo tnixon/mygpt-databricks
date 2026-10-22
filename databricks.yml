@@ -28,6 +28,9 @@
 # NOTE 2: mygpt_deploy_gateway needs a secret token with CAN QUERY on mygpt-bge-m3, in the
 # bundle-managed scope (scope / key = var.secret_scope / var.gw_token_secret_key):
 #   databricks secrets put-secret mygpt gw_upstream_token --profile mygpt
+# NOTE 3 (optional): the agents mirror their traces to LangSmith once its API key is in the
+# scope (`make secrets LANGSMITH=1` reads it from .env); redeploy both agents after adding it:
+#   databricks secrets put-secret mygpt langsmith_api_key --profile mygpt
 
 bundle:
   name: st-jude-mygpt-platform
@@ -151,6 +154,22 @@ variables:
   azure_key_secret_key:
     description: Secret key (in secret_scope) of the Azure AI Foundry API key (chat fallback route).
     default: azure_foundry_key
+  langsmith_api_key_secret_key:
+    description: Secret key (in secret_scope) of the LangSmith API key. The agents trace to LangSmith only when it exists.
+    default: langsmith_api_key
+  # ------------------------------------------------------------- LangSmith (optional trace mirror)
+  langsmith_project:
+    description: LangSmith project receiving the agents' traces.
+    default: mygpt
+  langsmith_endpoint:
+    description: LangSmith API URL (EU / self-hosted installs differ).
+    default: https://api.smith.langchain.com
+  langsmith_workspace_id:
+    description: LangSmith workspace id; needed when the API key is org-scoped.
+    default: ""
+  langsmith_hide_content:
+    description: '"true" sends only the run tree, timings and metadata to LangSmith (no questions, chunks or answers).'
+    default: "false"
 
 resources:
   # ---------------------------------------------------------------- foundations
@@ -482,7 +501,11 @@ resources:
                "--base-dir", "${workspace.file_path}", "--experiment", "${resources.experiments.mygpt_rag_agent.name}",
                "--tools-schema", "${var.tools_schema}", "--model-name", "${var.supervisor_model}",
                "--endpoint-name", "${var.supervisor_endpoint}", "--llm-endpoint", "${var.chat_gateway}",
-               "--rag-endpoint", "${var.rag_agent_endpoint}", "--genie-title", "${var.genie_title}"]
+               "--rag-endpoint", "${var.rag_agent_endpoint}", "--genie-title", "${var.genie_title}",
+               "--secret-scope", "${var.secret_scope}", "--langsmith-secret-key", "${var.langsmith_api_key_secret_key}",
+               "--langsmith-project", "${var.langsmith_project}", "--langsmith-endpoint", "${var.langsmith_endpoint}",
+               "--langsmith-workspace-id", "${var.langsmith_workspace_id}",
+               "--langsmith-hide-content", "${var.langsmith_hide_content}"]
       environments:
         - environment_key: default
           spec:
@@ -508,7 +531,11 @@ resources:
                "--vs-endpoint", "${var.vs_endpoint}", "--embed-endpoint", "${var.embeddings_gateway}",
                "--vs-embed-endpoint", "${var.embedding_endpoint}", "--chat-endpoint", "${var.chat_gateway}",
                "--translate-endpoint", "${var.translate_gateway}", "--sonnet-endpoint", "${var.fm_sonnet}",
-               "--llama-endpoint", "${var.fm_llama}", "--gptoss-endpoint", "${var.fm_gptoss}"]
+               "--llama-endpoint", "${var.fm_llama}", "--gptoss-endpoint", "${var.fm_gptoss}",
+               "--secret-scope", "${var.secret_scope}", "--langsmith-secret-key", "${var.langsmith_api_key_secret_key}",
+               "--langsmith-project", "${var.langsmith_project}", "--langsmith-endpoint", "${var.langsmith_endpoint}",
+               "--langsmith-workspace-id", "${var.langsmith_workspace_id}",
+               "--langsmith-hide-content", "${var.langsmith_hide_content}"]
       environments:
         - environment_key: default
           spec:

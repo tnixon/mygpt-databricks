@@ -45,7 +45,8 @@ column points to the deployment step that first needs it. Step 13 is optional.
 | ☐ | Unity Catalog metastore, with permission to create catalog `structural_biology` (or an existing one) | Every table, volume, model, function and index | 1 |
 | ☐ | Serverless jobs compute (environment client `1`) | All 14 platform-bundle jobs | 2 |
 | ☐ | Serverless SQL warehouse | ETL SQL, the app's section catalogue, Genie | 1 |
-| ☐ | Secret scopes | `mygpt/gw_upstream_token` (and optional `azure_foundry_key`) | 1, 4 |
+| ☐ | Secret scopes | `mygpt/gw_upstream_token` (and optional `azure_foundry_key`, `langsmith_api_key`) | 1, 4 |
+| ☐ | Optional: a LangSmith workspace + API key, and egress from Model Serving to its API | The agents' LangSmith trace mirror | 4 |
 | ☐ | Databricks Asset Bundles + CLI with OAuth | Both bundles | 2 |
 | ☐ | A service principal | Owns the gateway upstream token (CAN QUERY on its upstream endpoints) | 4 |
 
@@ -186,7 +187,7 @@ folded into 7), 8 → 10, 9 → 11, 10 → 12, 11 → 13.
 | 1 | Schema + experiment folder | manual (`deploy.sh` step 1) | schema `mygpt`, `/Shared/mygpt` |
 | 2 | Deploy the platform bundle | platform `bundle deploy` | `docs` / `uploads` / `eval_private` volumes, secret scope `mygpt`, VS endpoint `mygpt-vs`, Lakebase project, experiment, dashboard, 14 jobs |
 | 3 | Deploy the embedding model | platform `run mygpt_deploy_embedding` | UC model `bge_m3`, endpoint `mygpt-bge-m3` |
-| 4 | Store the gateway upstream token | manual | secret `mygpt/gw_upstream_token` |
+| 4 | Store the gateway upstream token | manual | secret `mygpt/gw_upstream_token` (optional `langsmith_api_key`) |
 | 5 | Deploy the AI Gateway endpoints | platform `run mygpt_deploy_gateway`, `…_chat_gateway`, `…_translate_gateway` | `mygpt-embeddings`, `mygpt-chat`, `mygpt-translate` |
 | 6 | Upload the document corpora | `databricks fs cp` | PDFs in the `docs` volume |
 | 7 | ETL run | platform `run mygpt_etl` | Document, chunk, config, section and Genie seed tables; the Vector Search index (created on the first run) |
@@ -273,6 +274,21 @@ databricks secrets put-secret mygpt azure_foundry_key -p $P
 ```
 
 **Creates:** secret `mygpt/gw_upstream_token` (plus `mygpt/azure_foundry_key` if used).
+
+**Optional: LangSmith tracing.** The RAG agent and the Supervisor always trace to MLflow. If the
+LangSmith API key is in the scope when their deploy jobs run (steps 8, 9), they also send
+the same spans to LangSmith. The Supervisor's run and the RAG runs it calls form one tree. Put
+the key in a local `.env` (copy `.env.example`; `.env` is gitignored and not synced), then:
+```bash
+make langsmith-secret PROFILE=$P   # reads LANGSMITH_API_KEY from .env over stdin, else prompts
+# or: databricks secrets put-secret mygpt langsmith_api_key -p $P
+```
+Set `langsmith_project`, `langsmith_endpoint` (EU / self-hosted) and `langsmith_workspace_id` (for
+org-scoped keys) in `variable-overrides.json`. Set `langsmith_hide_content` to `"true"` to send only
+the run tree, timings and metadata, with no questions, chunks or answers. These settings become
+endpoint env vars, so redeploy both agents after changing them (`make run-deploy_agent
+run-deploy_supervisor`). To turn LangSmith off, delete the secret and redeploy. Responses carry
+`custom_outputs.langsmith_run_id` next to the MLflow `trace_id`.
 
 ## 5. Deploy the Unity AI Gateway endpoints
 **Bundle:** platform (three jobs, all running `agents/gateway/driver.py --task …`)
