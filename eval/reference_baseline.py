@@ -33,8 +33,7 @@ import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
 
-BIOASQ_ANSWERS = os.path.join("reference", "MyGPT-evaluations", "BioASQ", "outputs", "answers",
-                              "answers-gpt-oss-20b-BioASQ.csv")
+BIOASQ_ANSWERS = os.path.join("BioASQ", "outputs", "answers", "answers-gpt-oss-20b-BioASQ.csv")  # under eval_repo()
 
 
 def _base_dir(base_dir: str) -> str:
@@ -77,7 +76,7 @@ def reference_rows(base: str) -> list[dict]:
             })
 
     # BioASQ: MyGPT's gpt-oss-20b answers vs the benchmark gold.
-    path = os.path.join(base, BIOASQ_ANSWERS)
+    path = os.path.join(ed.eval_repo(base), BIOASQ_ANSWERS)
     if os.path.exists(path):
         answers = {r["pubmed_id"]: r["answer"] for r in ed._read_csv(path)}
         for rec in ed.bioasq_records(base):
@@ -168,6 +167,7 @@ def main() -> None:
     # Full /Volumes paths of the deployment's docs / private ground-truth volumes ("" = defaults).
     ap.add_argument("--docs-volume", default="")
     ap.add_argument("--private-volume", default="")
+    ap.add_argument("--reference-volume", default="")
     ap.add_argument("--base-dir", default="")
     args = ap.parse_args()
 
@@ -177,7 +177,7 @@ def main() -> None:
     import mlflow
     import pandas as pd
 
-    eval_datasets.configure(args.docs_volume, args.private_volume)
+    eval_datasets.configure(args.docs_volume, args.private_volume, args.reference_volume)
     if eval_datasets.private_dir(base) is None:
         print("[reference] St. Jude's private ground truths not found — BioASQ only")
     judge = args.judge.strip().lower() == "true"

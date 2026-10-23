@@ -279,6 +279,7 @@ def main() -> None:
     # Full /Volumes paths of the deployment's docs / private ground-truth volumes ("" = defaults).
     ap.add_argument("--docs-volume", default="")
     ap.add_argument("--private-volume", default="")
+    ap.add_argument("--reference-volume", default="")
     ap.add_argument("--base-dir", default="")
     args = ap.parse_args()
 
@@ -292,7 +293,7 @@ def main() -> None:
     import scorers as sc
     from mlflow.genai import datasets
 
-    eval_datasets.configure(args.docs_volume, args.private_volume)
+    eval_datasets.configure(args.docs_volume, args.private_volume, args.reference_volume)
     spec = eval_datasets.specs(args.catalog, args.schema)[args.dataset]
     mlflow.set_experiment(args.experiment)
     data = datasets.get_dataset(name=spec.uc_table)
