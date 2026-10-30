@@ -73,6 +73,9 @@ variables:
   eval_private_volume:
     description: Restricted UC volume (in catalog.schema) holding St. Jude's private ground truths.
     default: eval_private
+  reference_volume:
+    description: UC volume (in catalog.schema) holding the MyGPT-evaluations CSVs (Genie seed + eval inputs).
+    default: reference
   vs_endpoint:
     description: Vector Search endpoint serving the corpus index.
     default: mygpt-vs
@@ -226,6 +229,15 @@ resources:
       name: ${var.uploads_volume}
       comment: "MyGPT upload libraries: uploads/<library_id>/<doc_id>__<file>"
 
+    # MyGPT-evaluations' CSVs (kinome / kinase seed, eval questions and gold) at their repo-relative
+    # paths under MyGPT-evaluations/, uploaded by deploy.sh step 6 (`make reference-csvs`). Jobs
+    # read here first and fall back to the bundle-synced reference/ copy (dev checkouts).
+    reference:
+      catalog_name: ${var.catalog}
+      schema_name: ${var.schema}
+      name: ${var.reference_volume}
+      comment: "MyGPT-evaluations reference CSVs: MyGPT-evaluations/<repo path>.csv"
+
     # St. Jude's PRIVATE ground truths (SME-labelled MyGPT answers + kinase gold), uploaded by
     # `make eval-private`; read by the eval jobs (eval/eval_datasets.py private_dir). Never in
     # git or the bundle sync. No grants: only the owner (the deployer, who is the eval jobs'
@@ -328,7 +340,8 @@ resources:
           spark_python_task:
             python_file: etl/structured_seed.py
             parameters:
-              ["--catalog", "${var.catalog}", "--schema", "${var.schema}", "--base-dir", "${workspace.file_path}"]
+              ["--catalog", "${var.catalog}", "--schema", "${var.schema}", "--base-dir", "${workspace.file_path}",
+               "--reference-volume", "/Volumes/${var.catalog}/${var.schema}/${var.reference_volume}"]
       environments:
         - environment_key: default
           spec:
@@ -564,7 +577,8 @@ resources:
                "--experiment", "${resources.experiments.mygpt_rag_agent.name}",
                "--datasets", "{{job.parameters.datasets}}",
                "--docs-volume", "/Volumes/${var.catalog}/${var.schema}/${var.docs_volume}",
-               "--private-volume", "/Volumes/${var.catalog}/${var.schema}/${var.eval_private_volume}"]
+               "--private-volume", "/Volumes/${var.catalog}/${var.schema}/${var.eval_private_volume}",
+               "--reference-volume", "/Volumes/${var.catalog}/${var.schema}/${var.reference_volume}"]
       parameters:
         - name: datasets
           default: "health_policies_fr,health_policies_es,health_policies_hi,kinase_literature,bioasq"
@@ -605,7 +619,8 @@ resources:
                    "--max-rows", "{{job.parameters.max_rows}}", "--gate", "{{job.parameters.gate}}",
                    "--translate", "{{job.parameters.translate}}", "--endpoint", "${var.rag_agent_endpoint}",
                    "--docs-volume", "/Volumes/${var.catalog}/${var.schema}/${var.docs_volume}",
-                   "--private-volume", "/Volumes/${var.catalog}/${var.schema}/${var.eval_private_volume}"]
+                   "--private-volume", "/Volumes/${var.catalog}/${var.schema}/${var.eval_private_volume}",
+                   "--reference-volume", "/Volumes/${var.catalog}/${var.schema}/${var.reference_volume}"]
       environments:
         - environment_key: eval
           spec:
@@ -628,7 +643,8 @@ resources:
               ["--base-dir", "${workspace.file_path}", "--experiment", "${resources.experiments.mygpt_rag_agent.name}",
                "--judge", "{{job.parameters.judge}}",
                "--docs-volume", "/Volumes/${var.catalog}/${var.schema}/${var.docs_volume}",
-               "--private-volume", "/Volumes/${var.catalog}/${var.schema}/${var.eval_private_volume}"]
+               "--private-volume", "/Volumes/${var.catalog}/${var.schema}/${var.eval_private_volume}",
+               "--reference-volume", "/Volumes/${var.catalog}/${var.schema}/${var.reference_volume}"]
       environments:
         - environment_key: eval
           spec:

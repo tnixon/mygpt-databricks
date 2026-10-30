@@ -47,13 +47,23 @@ PRIVATE_REPO = os.path.join("reference", "MyGPT-evaluations-private-main", "grou
 # The corpus PDFs as indexed (one folder per corpus); read via the /Volumes FUSE mount
 # on Databricks. Locally (tests) the submodule's own PDF folders are used instead.
 DOCS_VOLUME = "/Volumes/structural_biology/mygpt/docs"
+# MyGPT-evaluations' CSVs at their repo paths under <volume>/MyGPT-evaluations (deploy.sh
+# step 6). Without it, the bundle-synced reference/MyGPT-evaluations of a dev checkout.
+REFERENCE_VOLUME = "/Volumes/structural_biology/mygpt/reference"
 
 
-def configure(docs_volume: str = "", private_volume: str = "") -> None:
+def configure(docs_volume: str = "", private_volume: str = "", reference_volume: str = "") -> None:
     """Point at the deployment's volumes (the jobs pass the bundle's catalog/schema/volume names)."""
-    global DOCS_VOLUME, PRIVATE_VOLUME
+    global DOCS_VOLUME, PRIVATE_VOLUME, REFERENCE_VOLUME
     DOCS_VOLUME = docs_volume or DOCS_VOLUME
     PRIVATE_VOLUME = private_volume or PRIVATE_VOLUME
+    REFERENCE_VOLUME = reference_volume or REFERENCE_VOLUME
+
+
+def eval_repo(base_dir: str) -> str:
+    """Root of the MyGPT-evaluations inputs: the reference volume, else the synced repo copy."""
+    volume_repo = os.path.join(REFERENCE_VOLUME, "MyGPT-evaluations")
+    return volume_repo if os.path.isdir(volume_repo) else os.path.join(base_dir, EVAL_REPO)
 
 # MyGPT-evaluations' `maximum_chunks_count` for both use cases (BioASQ uses 15).
 K = 10
@@ -170,7 +180,7 @@ def policy_gold(base_dir: str) -> dict[tuple[str, str], dict]:
 
 def health_policy_records(base_dir: str, corpus: str, source_sha: str = "") -> list[dict]:
     language, pdf_dir = _LANG[corpus]
-    root = os.path.join(base_dir, EVAL_REPO, "health_policies", "inputs")
+    root = os.path.join(eval_repo(base_dir), "health_policies", "inputs")
     questions = _read_csv(os.path.join(root, "global_questions.csv"))
     # PDFs aren't bundle-synced (databricks.yml sync.exclude); list the indexed volume folder.
     volume_dir = os.path.join(DOCS_VOLUME, corpus)
@@ -274,14 +284,14 @@ _KINASE_GUIDELINES = {
 
 
 def kinase_synonyms(base_dir: str) -> dict[str, str]:
-    path = os.path.join(base_dir, EVAL_REPO, "kinase_literature", "inputs", "human_kinome_synonyms.csv")
+    path = os.path.join(eval_repo(base_dir), "kinase_literature", "inputs", "human_kinome_synonyms.csv")
     return {r["kinase_ID"]: r["synonyms"] for r in _read_csv(path) if r.get("kinase_ID") and r.get("synonyms")}
 
 
 def expression_systems(base_dir: str) -> list[str]:
     """Controlled vocabulary for Q11. Not in the upstream repo (collect_answers.py expects
     inputs/expression_systems_list.csv) — St. Jude to provide; empty until then."""
-    path = os.path.join(base_dir, EVAL_REPO, "kinase_literature", "inputs", "expression_systems_list.csv")
+    path = os.path.join(eval_repo(base_dir), "kinase_literature", "inputs", "expression_systems_list.csv")
     if not os.path.exists(path):
         return []
     return [r["expression_system_name"] for r in _read_csv(path) if r.get("expression_system_name")]
@@ -369,7 +379,7 @@ def kinase_expectations(qid: str, ground_truth: str) -> dict:
 
 
 def kinase_records(base_dir: str, source_sha: str = "", vocab: list[str] | None = None) -> list[dict]:
-    root = os.path.join(base_dir, EVAL_REPO, "kinase_literature", "inputs")
+    root = os.path.join(eval_repo(base_dir), "kinase_literature", "inputs")
     questions = _read_csv(os.path.join(root, "questions.csv"))
     pairs = _read_csv(os.path.join(root, "kinase_pubmed_pairs.csv"))
     gold = kinase_gold_rows(base_dir)
@@ -408,7 +418,7 @@ def kinase_records(base_dir: str, source_sha: str = "", vocab: list[str] | None 
 # --------------------------------------------------------------------------- #
 # BioASQ — public biomedical QA benchmark (13b golden enriched subset)
 # --------------------------------------------------------------------------- #
-BIOASQ_DIR = os.path.join(EVAL_REPO, "BioASQ", "inputs")
+BIOASQ_DIR = os.path.join("BioASQ", "inputs")  # under eval_repo()
 # MyGPT's answer prompt (BioASQ/scripts/collect_answers.py:101, minus the inlined contexts).
 # It forces a Yes / No / Maybe opening on every question; we keep that for yes/no questions
 # only, since it makes no sense for a factoid.
@@ -438,7 +448,7 @@ def _flatten(value) -> list[str]:
 
 
 def bioasq_records(base_dir: str, source_sha: str = "") -> list[dict]:
-    root = os.path.join(base_dir, BIOASQ_DIR)
+    root = os.path.join(eval_repo(base_dir), BIOASQ_DIR)
     # questions_final.csv's `pubmed_id` column actually holds the BioASQ question id.
     questions = _read_csv(os.path.join(root, "questions_final.csv"))
     gold = {r["question_id"]: r for r in _read_csv(os.path.join(root, "bioasq_13b_final_3964.csv"))}

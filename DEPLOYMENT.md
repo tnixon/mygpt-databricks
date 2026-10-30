@@ -53,7 +53,7 @@ column points to the deployment step that first needs it. Step 13 is optional.
 ### Data and document processing
 | ✓ | Capability | Used for | Step | Status |
 |---|---|---|---|---|
-| ☐ | UC volumes | `docs`, `uploads`, `eval_private` | 1, 2 | GA |
+| ☐ | UC volumes | `docs`, `uploads`, `reference`, `eval_private` | 1, 2 | GA |
 | ☐ | **File type** (`FILE EXTERNAL` / `FILE MANAGED`) | `documents` landing table | 7 | ⚠️ **Beta: enable on Previews** |
 | ☐ | `ai_parse_document` | PDF parsing in the ETL and `mygpt_upload_ingest` | 7 | GA (needs serverless env 3+ / DBR 17.3+) |
 | ☐ | Delta Change Data Feed | `doc_chunks` → Delta Sync index | 7 | GA |
@@ -108,11 +108,10 @@ That's why the index points at `mygpt-bge-m3` directly, not `mygpt-embeddings`.
 - Databricks CLI with an OAuth profile for the target workspace:
   `databricks auth login --host https://<workspace-url> --profile <profile>`
 - `git`, `make`, and Python with `databricks-sdk` (for the local smoke tests).
-- Clone **with submodules**. The Genie seed tables and the eval datasets are read from
-  `reference/MyGPT-evaluations`:
-  ```bash
-  git clone --recurse-submodules <repo-url>
-  ```
+- A local copy of St. Jude's **MyGPT-evaluations** repo, in any folder. It supplies the corpus
+  PDFs and the CSVs behind the Genie seed tables and the eval datasets (step 6). Point
+  `EVAL_DIR` in `deploy.sh` (or `EVAL_INPUTS=<dir>` for `make`) at it. The default is
+  `reference/MyGPT-evaluations`, where this repo's optional submodule checks it out.
 
 ### Workspace capabilities
 Work through the [checklist](#required-components-and-services-checklist) above, including the
@@ -185,11 +184,11 @@ folded into 7), 8 → 10, 9 → 11, 10 → 12, 11 → 13.
 | # | Step | Bundle / mechanism | Creates |
 |---|---|---|---|
 | 1 | Schema + experiment folder | manual (`deploy.sh` step 1) | schema `mygpt`, `/Shared/mygpt` |
-| 2 | Deploy the platform bundle | platform `bundle deploy` | `docs` / `uploads` / `eval_private` volumes, secret scope `mygpt`, VS endpoint `mygpt-vs`, Lakebase project, experiment, dashboard, 14 jobs |
+| 2 | Deploy the platform bundle | platform `bundle deploy` | `docs` / `uploads` / `reference` / `eval_private` volumes, secret scope `mygpt`, VS endpoint `mygpt-vs`, Lakebase project, experiment, dashboard, 14 jobs |
 | 3 | Deploy the embedding model | platform `run mygpt_deploy_embedding` | UC model `bge_m3`, endpoint `mygpt-bge-m3` |
 | 4 | Store the gateway upstream token | manual | secret `mygpt/gw_upstream_token` (optional `langsmith_api_key`) |
 | 5 | Deploy the AI Gateway endpoints | platform `run mygpt_deploy_gateway`, `…_chat_gateway`, `…_translate_gateway` | `mygpt-embeddings`, `mygpt-chat`, `mygpt-translate` |
-| 6 | Upload the document corpora | `databricks fs cp` | PDFs in the `docs` volume |
+| 6 | Upload the document corpora and reference CSVs | `databricks fs cp` | PDFs in the `docs` volume, MyGPT-evaluations CSVs in the `reference` volume |
 | 7 | ETL run | platform `run mygpt_etl` | Document, chunk, config, section and Genie seed tables; the Vector Search index (created on the first run) |
 | 8 | *(folded into step 7)* | | |
 | 9 | *(folded into step 7)* | | |
@@ -233,11 +232,12 @@ databricks bundle deploy   -p $P
 | Secret scope | `mygpt` (values are put in step 4; protected) |
 | Vector Search endpoint | `mygpt-vs` (STANDARD; protected) |
 | UC volume | `structural_biology.mygpt.uploads` (user upload libraries) |
+| UC volume | `structural_biology.mygpt.reference` (MyGPT-evaluations CSVs, uploaded in step 6) |
 | UC volume | `structural_biology.mygpt.eval_private` (restricted: owner and metastore admins only) |
 | MLflow experiment | `/Shared/mygpt/mygpt-rag-agent` (shared by agent models, eval runs and production traces) |
 | AI/BI dashboard | `[mygpt] Benchmarks — MyGPT vs Databricks agent` |
 | Jobs (defined, not run) | `mygpt_etl`, `mygpt_upload_ingest`, `mygpt_deploy_embedding`, `mygpt_deploy_gateway`, `mygpt_deploy_chat_gateway`, `mygpt_deploy_translate_gateway`, `mygpt_deploy_agent`, `mygpt_deploy_tools`, `mygpt_deploy_genie`, `mygpt_deploy_supervisor`, `mygpt_eval_build_datasets`, `mygpt_eval`, `mygpt_eval_reference`, `mygpt_eval_monitor` |
-| Workspace files | The repo (`etl/`, `agents/`, `eval/`, `dashboards/`, eval CSVs) synced to the bundle's `${workspace.file_path}` |
+| Workspace files | The repo (`etl/`, `agents/`, `eval/`, `dashboards/`) synced to the bundle's `${workspace.file_path}`. A checkout with the submodule also syncs `reference/MyGPT-evaluations/**/*.csv`; jobs use those only when the `reference` volume has no copy |
 
 **Record for step 12:**
 ```bash
@@ -317,19 +317,27 @@ python agents/gateway/smoke_test.py --profile $P --task chat
 python agents/gateway/smoke_test.py --profile $P --task translate
 ```
 
-## 6. Upload the document corpora
+## 6. Upload the document corpora and reference CSVs
 **Mechanism:** `make` targets or `databricks fs cp` (not a bundle).
+
+The `structured_seed` ETL task (step 7) and the eval jobs (step 13) read MyGPT-evaluations' CSVs
+from the `reference` volume, at their repo paths under `MyGPT-evaluations/`. Upload them before
+step 7, and again after the evaluations repo changes:
+```bash
+make reference-csvs PROFILE=$P EVAL_INPUTS=<MyGPT-evaluations dir>   # also run by eval-corpus
+```
 
 Each top-level folder in the `docs` volume is one **corpus**. The agent filters retrieval on it
 (`custom_inputs.corpus`).
 ```bash
-make eval-corpus PROFILE=$P [KINASE_PDFS=<dir of <pubmed_id>.pdf>]   # biomed, health_policies_fr/_es, kinase_literature
+make eval-corpus PROFILE=$P EVAL_INPUTS=<dir> [KINASE_PDFS=<dir of <pubmed_id>.pdf>]   # biomed, health_policies_fr/_es, kinase_literature
 make corpus-hi   PROFILE=$P HI_PDFS=<dir>                             # health_policies_hi (public Hindi PDFs)
 ```
 The ETL picks up only the corpora on the allow-list in `etl/sql/02_parse_chunk_index.sql`. To
 add a new corpus, follow the checklist in [`etl/README.md`](etl/README.md#today-the-mygpt_etl-job-incremental).
 
-**Creates:** PDFs under `/Volumes/structural_biology/mygpt/docs/<corpus>/`.
+**Creates:** PDFs under `/Volumes/structural_biology/mygpt/docs/<corpus>/`, and CSVs under
+`/Volumes/structural_biology/mygpt/reference/MyGPT-evaluations/`.
 
 ## 7. First ETL run
 **Bundle:** platform (`bundle run mygpt_etl`)
@@ -420,7 +428,10 @@ databricks bundle deploy   -p $P
 databricks bundle run app  -p $P
 ```
 Before this, set `warehouse_id`, `upload_job_id` and `experiment_id` in
-`app/.databricks/bundle/default/variable-overrides.json` to the values recorded in step 2. On a
+`app/.databricks/bundle/default/variable-overrides.json` to the values recorded in step 2, or pass
+them as `--var upload_job_id=<id> --var experiment_id=<id>` (`deploy.sh` step 10 looks both up
+from the platform bundle's `bundle summary -o json`). If either is empty, the deploy fails with
+`cannot create resources.apps.app: For input string: "" (400 BAD_REQUEST)`. On a
 fresh workspace, **don't** run the `bundle deployment bind` mentioned in `PLAN.md`. That step only applies to the
 original sandbox, where the app already existed.
 

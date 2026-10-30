@@ -19,7 +19,10 @@ APP_NAME ?= st-jude-mygpt
 
 # Phase-2 eval corpora: one docs-volume folder per corpus (= the agent's custom_inputs.corpus).
 DOCS_VOLUME := dbfs:/Volumes/$(CATALOG)/$(SCHEMA)/docs
-EVAL_INPUTS := reference/MyGPT-evaluations
+# Local copy of St. Jude's MyGPT-evaluations repo (any folder; EVAL_INPUTS=<dir>).
+EVAL_INPUTS ?= reference/MyGPT-evaluations
+# Its CSVs (Genie seed tables, eval datasets), at their repo paths; must match reference_volume.
+REFERENCE_VOLUME := dbfs:/Volumes/$(CATALOG)/$(SCHEMA)/reference
 # St. Jude's private ground truths (gitignored) -> the restricted eval_private UC volume.
 EVAL_PRIVATE := reference/MyGPT-evaluations-private-main/ground truths
 PRIVATE_VOLUME := dbfs:/Volumes/$(CATALOG)/$(SCHEMA)/eval_private
@@ -29,7 +32,7 @@ KINASE_PDFS ?=   # dir of St. Jude's kinase PDFs, named <pubmed_id>.pdf (not in 
 
 .PHONY: help init config submodules submodules-update install dev build typecheck lint test \
 	validate deploy deploy-platform deploy-app app-run secrets langsmith-secret gateways agents summary app-logs \
-	clean eval-corpus corpus-hi eval-private eval-test
+	clean eval-corpus reference-csvs corpus-hi eval-private eval-test
 # Job chains (gateways, agents) must run in order, and deploy-platform must finish first.
 .NOTPARALLEL:
 
@@ -119,13 +122,22 @@ app-logs: ## Show the app's recent logs (APP_LINES=<n>, default 200; FOLLOW=1 ke
 clean: ## Remove app build artifacts + node_modules
 	cd $(APP_DIR) && pnpm run clean
 
-eval-corpus: ## Upload the Phase-2 eval corpora to the docs volume (PROFILE=<name>, KINASE_PDFS=<dir>)
+eval-corpus: reference-csvs ## Upload the eval corpora + reference CSVs (PROFILE=<name>, EVAL_INPUTS=<dir>, KINASE_PDFS=<dir>)
 	databricks fs cp -r --overwrite "$(EVAL_INPUTS)/health_policies/inputs/French_10_pdfs" $(DOCS_VOLUME)/health_policies_fr --profile $(PROFILE)
 	databricks fs cp -r --overwrite "$(EVAL_INPUTS)/health_policies/inputs/Spanish_10_pdfs" $(DOCS_VOLUME)/health_policies_es --profile $(PROFILE)
 	databricks fs cp -r --overwrite "$(EVAL_INPUTS)/BioASQ/inputs/pdfs" $(DOCS_VOLUME)/biomed --profile $(PROFILE)
 	@if [ -n "$(KINASE_PDFS)" ]; then \
 	  databricks fs cp -r --overwrite "$(KINASE_PDFS)" $(DOCS_VOLUME)/kinase_literature --profile $(PROFILE); \
 	else echo "KINASE_PDFS not set — skipping kinase_literature (St. Jude to provide the PDFs)"; fi
+
+reference-csvs: ## Upload MyGPT-evaluations' CSVs to the reference volume (step 6; EVAL_INPUTS=<dir>)
+	@test -f "$(EVAL_INPUTS)/kinase_literature/inputs/human_kinome_synonyms.csv" || (echo "EVAL_INPUTS=$(EVAL_INPUTS) is not a MyGPT-evaluations folder"; exit 1)
+	@# Skips CSVs with ':' in the name (the CLI can't copy them; no job reads them).
+	cd "$(EVAL_INPUTS)" && find . -name '*.csv' ! -name '*:*' | while IFS= read -r f; do \
+	  f=$${f#./}; \
+	  databricks fs mkdir "$(REFERENCE_VOLUME)/MyGPT-evaluations/$$(dirname "$$f")" --profile $(PROFILE) && \
+	  databricks fs cp --overwrite "$$f" "$(REFERENCE_VOLUME)/MyGPT-evaluations/$$f" --profile $(PROFILE) || exit 1; \
+	done
 
 corpus-hi: ## Upload the Phase-6 public Hindi health-policy PDFs to the docs volume (PROFILE=<name>, HI_PDFS=<dir>)
 	@test -n "$(HI_PDFS)" || (echo "set HI_PDFS=<dir of public Hindi PDFs> (see etl/README.md, health_policies_hi)"; exit 1)

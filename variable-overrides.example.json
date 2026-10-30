@@ -6,6 +6,7 @@
   "docs_volume": "docs",
   "uploads_volume": "uploads",
   "eval_private_volume": "eval_private",
+  "reference_volume": "reference",
   "vs_endpoint": "mygpt-vs",
   "vs_index": "doc_chunks_corpus_index",
   "pg_project": "mygpt",
