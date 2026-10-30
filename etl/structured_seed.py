@@ -2,8 +2,8 @@
 
 MyGPT never made spreadsheets SQL-queryable (it chunks their rows into RAG), so this is the
 minimal loader PLAN.md calls for until Phase 3 lands spreadsheet ingestion at scale. It reads
-St. Jude's kinase_literature CSVs from the synced MyGPT-evaluations submodule (the bundle's
-`sync.include` already ships them) and writes:
+St. Jude's MyGPT-evaluations kinase_literature CSVs from the reference volume (deploy.sh step 6),
+falling back to the bundle-synced reference/ copy of a dev checkout, and writes:
 
   kinome            the human kinome: one row per kinase (UniProt entry, synonyms, group, family)
   kinase_papers     the BlueSky library: one row per (paper, kinase) pair, keyed by PubMed id
@@ -13,7 +13,8 @@ Table and column comments are part of the contract: Genie (and the Supervisor's 
 prompt) read them. A serverless spark_python_task rather than SQL, because SQL warehouses
 can't read workspace files and a CSV-via-volume hop was brittle in Phase 1.
 
-    python etl/structured_seed.py --base-dir ${workspace.file_path}
+    python etl/structured_seed.py --base-dir ${workspace.file_path} \
+        --reference-volume /Volumes/<catalog>/<schema>/<reference_volume>
 """
 
 from __future__ import annotations
@@ -22,7 +23,21 @@ import argparse
 import csv
 import os
 
-KINASE_INPUTS = os.path.join("reference", "MyGPT-evaluations", "kinase_literature", "inputs")
+KINASE_INPUTS = os.path.join("MyGPT-evaluations", "kinase_literature", "inputs")
+
+
+def kinase_inputs(reference_volume: str, base_dir: str) -> str:
+    """The kinase_literature inputs folder: the reference volume, else the synced repo copy."""
+    candidates = [os.path.join(base_dir, "reference", KINASE_INPUTS)]
+    if reference_volume:
+        candidates.insert(0, os.path.join(reference_volume, KINASE_INPUTS))
+    for path in candidates:
+        if os.path.isfile(os.path.join(path, "human_kinome_synonyms.csv")):
+            return path
+    raise FileNotFoundError(
+        f"human_kinome_synonyms.csv not found in {' or '.join(candidates)}. Upload the "
+        "MyGPT-evaluations CSVs to the reference volume (deploy.sh step 6 with EVAL_DIR set, "
+        "or `make reference-csvs EVAL_INPUTS=<dir>`), then re-run mygpt_etl.")
 
 
 def read_kinome(path: str) -> list[dict]:
@@ -95,10 +110,11 @@ def main() -> None:
     ap.add_argument("--catalog", default="structural_biology")
     ap.add_argument("--schema", default="mygpt")
     ap.add_argument("--base-dir", default="")
+    ap.add_argument("--reference-volume", default="")
     args = ap.parse_args()
 
-    base = args.base_dir or os.getcwd()
-    inputs = os.path.join(base, KINASE_INPUTS)
+    inputs = kinase_inputs(args.reference_volume, args.base_dir or os.getcwd())
+    print(f"[structured_seed] reading {inputs}")
     fq = f"{args.catalog}.{args.schema}"
 
     from pyspark.sql import SparkSession

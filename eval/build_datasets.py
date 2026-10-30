@@ -48,6 +48,7 @@ def main() -> None:
     # Full /Volumes paths of the deployment's docs / private ground-truth volumes ("" = defaults).
     ap.add_argument("--docs-volume", default="")
     ap.add_argument("--private-volume", default="")
+    ap.add_argument("--reference-volume", default="")
     ap.add_argument("--base-dir", default="")
     args = ap.parse_args()
 
@@ -57,7 +58,7 @@ def main() -> None:
     import mlflow
     from mlflow.genai import datasets
 
-    eval_datasets.configure(args.docs_volume, args.private_volume)
+    eval_datasets.configure(args.docs_volume, args.private_volume, args.reference_volume)
     experiment_id = mlflow.set_experiment(args.experiment).experiment_id
     if eval_datasets.private_dir(base) is None:
         print("[build] St. Jude's private ground truths not found (make eval-private) — "
