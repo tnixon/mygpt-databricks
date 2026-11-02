@@ -33,10 +33,15 @@ hybrid scores rescored per source rather than a separate full-corpus bm25s index
 answer-side term can be a real stemmed BM25 of the answer over the retrieved contexts, as in
 MyGPT (``answer_bm25``); off by default until bm25_best/worst are calibrated for it — with
 the bootstrap window ARS saturated at 100 on English answers (2026-10-17).
+
+Tracing: MLflow is the system of record. When LANGSMITH_TRACING=true the spans are mirrored
+to LangSmith; a Supervisor call passes its retrieve run's headers in
+``custom_inputs.langsmith_parent`` so this run nests under the Supervisor's tree.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
@@ -50,6 +55,11 @@ import mlflow
 import numpy as np
 from mlflow.pyfunc import ResponsesAgent
 from mlflow.types.responses import ResponsesAgentRequest, ResponsesAgentResponse
+
+try:
+    import langsmith as ls
+except ImportError:  # optional: LangSmith tracing is simply off without it
+    ls = None
 
 VS_INDEX = os.environ.get("MYGPT_VS_INDEX", "structural_biology.mygpt.doc_chunks_corpus_index")
 VS_ENDPOINT = os.environ.get("MYGPT_VS_ENDPOINT", "mygpt-vs")
@@ -394,6 +404,26 @@ def load_dataset_config(dataset_name: str, workspace) -> DatasetConfig:
 
 
 # =========================================================================== #
+# LANGSMITH  (mirrors the MLflow spans; no-ops unless LANGSMITH_TRACING=true)
+# =========================================================================== #
+def ls_traceable(run_type: str, name: str | None = None):
+    """langsmith.traceable when installed (sends nothing unless tracing is on), else identity."""
+    return ls.traceable(run_type=run_type, name=name) if ls else (lambda f: f)
+
+
+@contextlib.contextmanager
+def ls_run(name: str, run_type: str, inputs: dict, parent: Any = None, metadata: dict | None = None):
+    """A LangSmith run next to an MLflow span; yields None when tracing is off. `parent` is
+    the caller's run headers (distributed tracing), ignored unless it is a dict."""
+    if ls is None or not ls.utils.tracing_is_enabled():
+        yield None
+        return
+    with ls.trace(name, run_type=run_type, inputs=inputs, metadata=metadata,
+                  parent=parent if isinstance(parent, dict) else None) as run:
+        yield run
+
+
+# =========================================================================== #
 # AGENT
 # =========================================================================== #
 class MyGPTRagAgent(ResponsesAgent):
@@ -444,11 +474,12 @@ class MyGPTRagAgent(ResponsesAgent):
         (RetrievalGroundedness / RetrievalRelevance) can read the retrieved context off
         the trace. Returns the raw source dicts the scoring pipeline works on.
         ``provided`` (upload libraries) skips AI Search but keeps the same span."""
-        with mlflow.start_span(name="retrieve", span_type="RETRIEVER") as span:
-            span.set_inputs({"query": query, "corpus": corpus, "focus": focus, "k": k,
-                             "provided": provided is not None})
+        inputs = {"query": query, "corpus": corpus, "focus": focus, "k": k, "provided": provided is not None}
+        with mlflow.start_span(name="retrieve", span_type="RETRIEVER") as span, \
+                ls_run("retrieve", "retriever", inputs) as ls_span:
+            span.set_inputs(inputs)
             sources = provided if provided is not None else self._retrieve(query, corpus, focus, k)
-            span.set_outputs([
+            documents = [
                 {
                     "page_content": s["context"],
                     "metadata": {
@@ -457,7 +488,10 @@ class MyGPTRagAgent(ResponsesAgent):
                     },
                 }
                 for s in sources
-            ])
+            ]
+            span.set_outputs(documents)
+            if ls_span is not None:
+                ls_span.end(outputs={"documents": documents})
         return sources
 
     def _retrieve(self, query: str, corpus: str | None, focus: dict, k: int) -> list[dict]:
@@ -508,8 +542,10 @@ class MyGPTRagAgent(ResponsesAgent):
     def _translate(self, text: str, source_language: str, target_language: str) -> tuple[str, str | None]:
         """Translate with MyGPT's translategemma system prompt. Returns (text, error); any
         failure falls back to the original text so translation never fails a request."""
-        with mlflow.start_span(name="translate", span_type="LLM") as span:
-            span.set_inputs({"text": text, "source": source_language, "target": target_language})
+        inputs = {"text": text, "source": source_language, "target": target_language}
+        with mlflow.start_span(name="translate", span_type="LLM") as span, \
+                ls_run("translate", "llm", inputs) as ls_span:
+            span.set_inputs(inputs)
             src_full, src_code = LANGUAGES.get(source_language, (source_language.title(), source_language[:2]))
             tgt_full, tgt_code = LANGUAGES[target_language]
             system = (
@@ -533,11 +569,16 @@ class MyGPTRagAgent(ResponsesAgent):
                 error = f"{type(exc).__name__}: {exc}"
                 print(f"[translate] falling back to the original text: {error}")
                 span.set_outputs({"text": text, "error": error})
+                if ls_span is not None:
+                    ls_span.end(outputs={"text": text}, error=error)
                 return text, error
             span.set_outputs({"text": out})
+            if ls_span is not None:
+                ls_span.end(outputs={"text": out})
             return out, None
 
     @mlflow.trace(span_type="RERANKER")
+    @ls_traceable("chain")
     def _rerank(self, query: str, sources: list[dict], cfg: DatasetConfig, per_source_language: bool = False) -> list[dict]:
         """Rerank with the dataset's reranker. In the mixed "all corpora" scope
         (``per_source_language``) each source uses the reranker for its corpus' language."""
@@ -564,6 +605,7 @@ class MyGPTRagAgent(ResponsesAgent):
         return kept or sources
 
     @mlflow.trace(span_type="PARSER")
+    @ls_traceable("chain")
     def _score_question(self, sources: list[dict], cfg: DatasetConfig) -> tuple[float, float, list[dict]]:
         distances = [s["vector_distance_raw"] for s in sources]
         semantic, normalized = question_semantic_score(distances, cfg.cutoffs)
@@ -575,6 +617,7 @@ class MyGPTRagAgent(ResponsesAgent):
         return qrs, semantic, sources
 
     @mlflow.trace(span_type="LLM")
+    @ls_traceable("llm")
     def _generate(self, query: str, sources: list[dict], model_alias: str, instructions: str = "") -> str:
         context = "\n\n".join(
             f"[{i + 1}] {s['source_name']} (p{s['page'] if s['page'] is not None else '?'}):\n{s['context']}"
@@ -601,6 +644,7 @@ class MyGPTRagAgent(ResponsesAgent):
         return _message_text(resp)
 
     @mlflow.trace(span_type="PARSER")
+    @ls_traceable("chain")
     def _score_answer(self, answer: str, sources: list[dict], question_semantic: float, cfg: DatasetConfig) -> dict:
         if not answer or not sources:
             return {"ars": 0.0, "hi_eq": 100.0, "hi_rf": None, "nli": []}
@@ -632,7 +676,25 @@ class MyGPTRagAgent(ResponsesAgent):
         return {"ars": ars, "hi_eq": hi_eq, "hi_rf": hi_rf, "nli": nli_labels}
 
     def predict(self, request: ResponsesAgentRequest) -> ResponsesAgentResponse:
-        ci = request.custom_inputs or {}
+        ci = dict(request.custom_inputs or {})
+        inputs = {"query": _last_user_text(request),
+                  "custom_inputs": {k: v for k, v in ci.items() if k not in ("sources", "langsmith_parent")}}
+        with ls_run("mygpt-rag-agent", "chain", inputs, parent=ci.pop("langsmith_parent", None)) as run:
+            resp = self._predict(request, ci)
+            co = resp.custom_outputs
+            co["langsmith_run_id"] = str(run.id) if run is not None else None
+            if run is not None:
+                # Metadata is never redacted (LANGSMITH_HIDE_*): the MLflow tag values only, no user text.
+                run.add_metadata({"mlflow_trace_id": co.get("trace_id"), "corpus": co.get("corpus") or "all",
+                                  "dataset": ci.get("dataset") or ci.get("corpus") or "mygpt", "model": co.get("model"),
+                                  "retrieval": "provided" if ci.get("sources") is not None else "ai_search",
+                                  "language": co.get("documents_language"),
+                                  "translated": str(bool(co.get("translated_query"))).lower()})
+                run.end(outputs={"answer": resp.output[0].content[0].get("text") if resp.output else None,
+                                 **{k: co.get(k) for k in ("qrs", "ars", "hi_eq", "hi_rf", "retrieve_error")}})
+        return resp
+
+    def _predict(self, request: ResponsesAgentRequest, ci: dict) -> ResponsesAgentResponse:
         # corpus (optional) isolates retrieval to one top-level volume folder; absent =
         # search every corpus (the app's default). Config defaults to the corpus' row.
         corpus = ci.get("corpus") or None

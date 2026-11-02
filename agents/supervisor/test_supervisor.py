@@ -6,7 +6,10 @@
 from __future__ import annotations
 
 import json
+import os
+from unittest.mock import MagicMock
 
+import langsmith
 import mlflow
 import pytest
 from mlflow.types.responses import ResponsesAgentRequest
@@ -14,6 +17,7 @@ from mlflow.types.responses import ResponsesAgentRequest
 import supervisor_agent as sa
 
 mlflow.tracing.disable()
+os.environ["LANGSMITH_TRACING"] = "false"  # a developer's .env must never send test traces
 
 
 def tool_call(name: str, args: dict, cid: str = "c1") -> dict:
@@ -403,3 +407,51 @@ def test_function_tools_listing_failure_is_not_fatal():
 ])
 def test_message_text(content, expected):
     assert sa.message_text(content) == expected
+
+
+# --------------------------------------------------------------------------- LangSmith
+def run_names(client: MagicMock) -> list[str]:
+    return [c.kwargs.get("name") for c in client.create_run.call_args_list]
+
+
+def test_langsmith_off_sends_nothing_and_forwards_no_parent():
+    t = FakeTransport([{"tool_calls": [tool_call("search_documents", {"query": "q"})]}])
+    resp = ask(t)
+    assert "langsmith_parent" not in t.rag_calls[0]["custom_inputs"]
+    assert resp.custom_outputs["langsmith_run_id"] is None
+
+
+def test_langsmith_missing_package_is_harmless(monkeypatch):
+    monkeypatch.setattr(sa, "ls", None)
+    t = FakeTransport([{"tool_calls": [tool_call("search_documents", {"query": "q"})]}])
+    resp = ask(t, route="docs")
+    assert answer_text(resp) == "ABL1 is expressed in Sf9 cells [1]." and resp.custom_outputs["langsmith_run_id"] is None
+
+
+def test_langsmith_on_mirrors_spans_and_links_the_rag_run():
+    client = MagicMock()
+    t = FakeTransport([{"tool_calls": [tool_call("search_documents", {"query": "q"})]}])
+    with langsmith.tracing_context(enabled=True, client=client, project_name="test"):
+        resp = ask(t, corpus="kinase_literature", langsmith_parent="not headers")
+    names = run_names(client)
+    assert names[0] == "mygpt-supervisor" and {"chat", "search_documents", "retrieve"} <= set(names)
+    root = client.create_run.call_args_list[0].kwargs
+    assert root["inputs"]["custom_inputs"] == {"corpus": "kinase_literature"}  # no langsmith_parent / sources
+    assert resp.custom_outputs["langsmith_run_id"] == str(root["id"])
+    # The RAG endpoint gets the retrieve run's headers, so its run nests in the same tree.
+    parent = t.rag_calls[0]["custom_inputs"]["langsmith_parent"]
+    assert parent["langsmith-trace"]
+    child = langsmith.RunTree.from_headers(parent)
+    retrieve = next(c.kwargs for c in client.create_run.call_args_list if c.kwargs["name"] == "retrieve")
+    assert child.id == retrieve["id"] and child.trace_id == root["id"]
+
+
+def test_langsmith_root_nests_under_a_callers_headers():
+    client = MagicMock()
+    with langsmith.tracing_context(enabled=True, client=client, project_name="test"):
+        with langsmith.trace("caller", "chain") as caller:
+            headers = caller.to_headers()
+        t = FakeTransport([{"content": "Hello!"}])
+        ask(t, question="hi", langsmith_parent=headers)
+    root = next(c.kwargs for c in client.create_run.call_args_list if c.kwargs["name"] == "mygpt-supervisor")
+    assert root["parent_run_id"] == caller.id and root["trace_id"] == caller.trace_id

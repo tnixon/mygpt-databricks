@@ -38,6 +38,30 @@ def _package_dir(base_dir: str) -> str:
         return os.path.join(os.getcwd(), "agents", "rag_agent")
 
 
+def langsmith_env(w, args) -> dict[str, str]:
+    """Serving env vars that mirror the agent's traces to LangSmith, or {} when the API-key
+    secret doesn't exist (its presence is the on/off switch). Only the secret's NAME is read;
+    the endpoint resolves the {{secrets/...}} reference itself."""
+    keys = {s.key for s in w.secrets.list_secrets(args.secret_scope)}
+    if args.langsmith_secret_key not in keys:
+        print(f"LangSmith tracing off (no secret {args.secret_scope}/{args.langsmith_secret_key})")
+        return {}
+    env = {
+        "LANGSMITH_TRACING": "true",
+        "LANGSMITH_API_KEY": f"{{{{secrets/{args.secret_scope}/{args.langsmith_secret_key}}}}}",
+        "LANGSMITH_PROJECT": args.langsmith_project,
+        "LANGSMITH_ENDPOINT": args.langsmith_endpoint,
+    }
+    if args.langsmith_workspace_id:
+        env["LANGSMITH_WORKSPACE_ID"] = args.langsmith_workspace_id
+    if args.langsmith_hide_content.lower() == "true":
+        # Run tree, timings and metadata only; no questions, chunks or answers leave the workspace.
+        env["LANGSMITH_HIDE_INPUTS"] = env["LANGSMITH_HIDE_OUTPUTS"] = "true"
+    print(f"LangSmith tracing on (project {args.langsmith_project}"
+          f"{', content hidden' if 'LANGSMITH_HIDE_INPUTS' in env else ''})")
+    return env
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--catalog", default="structural_biology")
@@ -70,6 +94,13 @@ def main() -> None:
     # the endpoint's production traces (pinned via MLFLOW_EXPERIMENT_ID below).
     # Declared as a DABs resource in databricks.yml.
     ap.add_argument("--experiment", default="/Shared/mygpt/mygpt-rag-agent")
+    # Optional LangSmith mirror of the traces: on when the API-key secret exists (langsmith_env).
+    ap.add_argument("--secret-scope", default="mygpt")
+    ap.add_argument("--langsmith-secret-key", default="langsmith_api_key")
+    ap.add_argument("--langsmith-project", default="mygpt")
+    ap.add_argument("--langsmith-endpoint", default="https://api.smith.langchain.com")
+    ap.add_argument("--langsmith-workspace-id", default="")
+    ap.add_argument("--langsmith-hide-content", default="false")
     ap.add_argument("--base-dir", default="")
     args = ap.parse_args()
 
@@ -117,6 +148,7 @@ def main() -> None:
 
     # Deploy via Mosaic AI Agent Framework (creates/updates the serving endpoint).
     from databricks import agents
+    from databricks.sdk import WorkspaceClient
 
     agents.deploy(
         uc_model,
@@ -138,6 +170,7 @@ def main() -> None:
             # monitoring scorers registered on /Shared/mygpt/mygpt-rag-agent.
             "MLFLOW_EXPERIMENT_ID": experiment_id,
             # Set MYGPT_WAREHOUSE_ID to read live config from Delta; omit for packaged defaults.
+            **langsmith_env(WorkspaceClient(), args),
         },
         scale_to_zero_enabled=True,
     )

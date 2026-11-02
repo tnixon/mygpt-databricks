@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
+from unittest.mock import MagicMock
 
+import langsmith
 import mlflow
 import numpy as np
 from mlflow.types.responses import ResponsesAgentRequest
@@ -16,6 +19,7 @@ from mlflow.types.responses import ResponsesAgentRequest
 import agent as ag
 
 mlflow.tracing.disable()
+os.environ["LANGSMITH_TRACING"] = "false"  # a developer's .env must never send test traces
 
 FR_CHUNK = "La politique nationale prévoit un dépistage du cancer chez l'enfant."
 EN_CHUNK = "Imatinib binds the ABL1 kinase domain."
@@ -167,3 +171,32 @@ def test_upload_library_sources_follow_the_library_config():
     assert out["translated_query"].startswith("FR<")
     assert out["sources"][0]["reranker"] == ag.RERANK_MODEL_MULTILINGUAL
     assert not api.paths("/vector-search/")
+
+
+# --------------------------------------------------------------------------- LangSmith
+def test_langsmith_off_by_default():
+    api = FakeApi([["k1", "p.pdf", "kinase_literature", "Results", 2, EN_CHUNK, 0.8]])
+    assert ask(make_agent(api), "What binds ABL1?", corpus="kinase_literature")["langsmith_run_id"] is None
+
+
+def test_langsmith_mirrors_the_pipeline_under_the_supervisors_run():
+    client = MagicMock()
+    api = FakeApi(fr_rows())
+    with langsmith.tracing_context(enabled=True, client=client, project_name="test"):
+        with langsmith.trace("retrieve", "retriever") as supervisor_run:
+            headers = supervisor_run.to_headers()
+        out = ask(make_agent(api), "Does the policy mention children?", corpus="health_policies_fr",
+                  langsmith_parent=headers)
+    runs = {c.kwargs["name"]: c.kwargs for c in client.create_run.call_args_list}
+    assert {"mygpt-rag-agent", "translate", "retrieve", "_rerank", "_score_question", "_generate",
+            "_score_answer"} <= set(runs)
+    root = runs["mygpt-rag-agent"]
+    assert root["parent_run_id"] == supervisor_run.id and root["trace_id"] == supervisor_run.trace_id
+    assert "langsmith_parent" not in root["inputs"]["custom_inputs"]
+    assert out["langsmith_run_id"] == str(root["id"])
+    # metadata carries labels only (it isn't redacted by LANGSMITH_HIDE_*)
+    update = next(c.kwargs for c in client.update_run.call_args_list if c.kwargs["run_id"] == root["id"])
+    meta = update["extra"]["metadata"]
+    assert (meta["corpus"], meta["retrieval"], meta["language"], meta["translated"]) == (
+        "health_policies_fr", "ai_search", "french", "true")
+    assert update["outputs"]["answer"] == out["answer"] and update["outputs"]["qrs"] == out["qrs"]

@@ -35,10 +35,16 @@ corpus / documents / section scope but never widen it.
 Like agents/rag_agent/agent.py, every call goes over REST with the serving endpoint's
 injected credentials (WorkspaceClient().api_client), and this file imports nothing from its
 siblings because MLflow imports it in isolation when validating a code-based model.
+
+Tracing: MLflow (the shared experiment) is the system of record. When LANGSMITH_TRACING=true
+(the driver sets it when the LangSmith secret exists) the same spans are mirrored to
+LangSmith, and each RAG call carries the retrieve run's headers (custom_inputs.langsmith_parent)
+so the RAG agent's run nests under it: one LangSmith tree per question.
 """
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import json
 import os
@@ -52,6 +58,11 @@ import mlflow
 from mlflow.entities import SpanType
 from mlflow.pyfunc import ResponsesAgent
 from mlflow.types.responses import ResponsesAgentRequest, ResponsesAgentResponse
+
+try:
+    import langsmith as ls
+except ImportError:  # optional: LangSmith tracing is simply off without it
+    ls = None
 
 LLM_ENDPOINT = os.environ.get("MYGPT_SUPERVISOR_LLM", "mygpt-chat")
 RAG_ENDPOINT = os.environ.get("MYGPT_RAG_ENDPOINT", "mygpt-rag-agent")
@@ -79,6 +90,26 @@ SYSTEM_PROMPT = """You are the router of MyGPT, St. Jude's governed research ass
 - PDB / PubMed tools: 3D protein structures in the RCSB Protein Data Bank, and PubMed paper metadata. Prefer search_pdb_by_gene for "structures of <protein>".
 - list_corpora, list_corpus_documents: which governed collections and documents exist.
 Rules: prefer exactly one tool; combine tools only when the question needs several kinds of information. Never answer questions about the documents from your own knowledge. If no tool fits (a greeting, a clarification), answer briefly without tools. You cannot create, change or fill libraries; if asked, say the user can do that on the Libraries page. When combining results, keep the [n] citations search_documents returned exactly as given (they are already unique across libraries), say which library a finding comes from when libraries disagree or cover different parts, and name PDB ids and PubMed ids explicitly."""
+
+
+# =========================================================================== #
+# LANGSMITH  (mirrors the MLflow spans; no-ops unless LANGSMITH_TRACING=true)
+# =========================================================================== #
+def ls_traceable(run_type: str, name: str | None = None):
+    """langsmith.traceable when installed (sends nothing unless tracing is on), else identity."""
+    return ls.traceable(run_type=run_type, name=name) if ls else (lambda f: f)
+
+
+@contextlib.contextmanager
+def ls_run(name: str, run_type: str, inputs: dict, parent: Any = None, metadata: dict | None = None):
+    """A LangSmith run next to an MLflow span; yields None when tracing is off. `parent` is
+    the caller's run headers (distributed tracing), ignored unless it is a dict."""
+    if ls is None or not ls.utils.tracing_is_enabled():
+        yield None
+        return
+    with ls.trace(name, run_type=run_type, inputs=inputs, metadata=metadata,
+                  parent=parent if isinstance(parent, dict) else None) as run:
+        yield run
 
 
 # =========================================================================== #
@@ -381,9 +412,13 @@ class MyGPTSupervisor(ResponsesAgent):
                     rag_ci["corpus"] = lib["corpus"] or llm_corpus
             if focus:
                 rag_ci["focus"] = focus
-            with mlflow.start_span(name="retrieve", span_type=SpanType.RETRIEVER) as span:
-                span.set_inputs({"query": query, "library": lib["name"], "corpus": rag_ci.get("corpus"),
-                                 "focus": focus, "provided": "sources" in rag_ci})
+            retrieve_inputs = {"query": query, "library": lib["name"], "corpus": rag_ci.get("corpus"),
+                               "focus": focus, "provided": "sources" in rag_ci}
+            with mlflow.start_span(name="retrieve", span_type=SpanType.RETRIEVER) as span, \
+                    ls_run("retrieve", "retriever", retrieve_inputs) as ls_span:
+                span.set_inputs(retrieve_inputs)
+                if ls_span is not None:
+                    rag_ci["langsmith_parent"] = ls_span.to_headers()  # the RAG run nests under this one
                 try:
                     resp = self.t.rag({"input": [{"role": "user", "content": query}], "custom_inputs": rag_ci})
                 except Exception as exc:  # noqa: BLE001  (one library failing keeps the others)
@@ -391,12 +426,15 @@ class MyGPTSupervisor(ResponsesAgent):
                 sources = (resp.get("custom_outputs") or {}).get("sources") or []
                 # Same Document shape as the RAG agent's span, so RetrievalGroundedness reads the
                 # Supervisor trace too (the RAG endpoint's own trace is separate).
-                span.set_outputs([
+                documents = [
                     {"page_content": s.get("context") or s.get("snippet") or "",
                      "metadata": {"doc_uri": s.get("source_name"), "chunk_id": s.get("chunk_id"),
                                   "corpus": s.get("corpus"), "section": s.get("section"), "page": s.get("page")}}
                     for s in sources
-                ])
+                ]
+                span.set_outputs(documents)
+                if ls_span is not None:
+                    ls_span.end(outputs={"documents": documents})
             return lib, resp
 
         if len(chosen) == 1:
@@ -451,7 +489,8 @@ class MyGPTSupervisor(ResponsesAgent):
         name = fn.get("name") or ""
         started = time.monotonic()
         record: dict[str, Any] = {"name": name, "ok": True}
-        with mlflow.start_span(name=name or "tool", span_type=SpanType.TOOL) as span:
+        with mlflow.start_span(name=name or "tool", span_type=SpanType.TOOL) as span, \
+                ls_run(name or "tool", "tool", _safe_args(call)) as ls_span:
             try:
                 args = _args(fn.get("arguments"))
                 record["args"] = args
@@ -474,6 +513,8 @@ class MyGPTSupervisor(ResponsesAgent):
                 result = {"error": f"{type(exc).__name__}: {exc}"}
             text = _clip(result)
             span.set_outputs(text)
+            if ls_span is not None:
+                ls_span.end(outputs={"output": text}, error=None if record["ok"] else text)
         record["latency_ms"] = int((time.monotonic() - started) * 1000)
         record["result"] = text[:300]
         state["tool_calls"].append(record)
@@ -482,6 +523,22 @@ class MyGPTSupervisor(ResponsesAgent):
     # ------------------------------------------------------------------ main
     def predict(self, request: ResponsesAgentRequest) -> ResponsesAgentResponse:
         ci = dict(request.custom_inputs or {})
+        inputs = {"input": _conversation(request),
+                  "custom_inputs": {k: v for k, v in ci.items() if k not in ("sources", "langsmith_parent")}}
+        with ls_run("mygpt-supervisor", "chain", inputs, parent=ci.pop("langsmith_parent", None)) as run:
+            resp = self._predict(request, ci)
+            co = resp.custom_outputs
+            co["langsmith_run_id"] = str(run.id) if run is not None else None
+            if run is not None:
+                # Metadata is never redacted (LANGSMITH_HIDE_*): ids and labels only, no user text.
+                run.add_metadata({"mlflow_trace_id": co.get("supervisor_trace_id"), "route": ",".join(co["route"]),
+                                  "corpus": ci.get("corpus") or "all", "scores_scope": co.get("scores_scope"),
+                                  "libraries": len(co.get("libraries_searched") or []), "model": LLM_ENDPOINT})
+                run.end(outputs={"answer": resp.output[0].content[0].get("text") if resp.output else None,
+                                 **{k: co.get(k) for k in ("route", "scores_scope", "qrs", "ars", "hi_eq", "error")}})
+        return resp
+
+    def _predict(self, request: ResponsesAgentRequest, ci: dict) -> ResponsesAgentResponse:
         route = ci.get("route") if ci.get("route") in ROUTES else "auto"
         turns = _conversation(request)
         question = turns[-1]["content"] if turns and turns[-1]["role"] == "user" else ""
@@ -565,6 +622,7 @@ class MyGPTSupervisor(ResponsesAgent):
             return None, False
 
     @mlflow.trace(span_type=SpanType.CHAT_MODEL)
+    @ls_traceable("llm", "chat")
     def _chat(self, messages: list[dict], tools: list[dict] | None, tool_choice: str = "auto") -> dict:
         return self.t.chat(messages, tools, tool_choice)
 
