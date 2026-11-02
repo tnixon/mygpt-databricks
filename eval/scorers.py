@@ -15,6 +15,7 @@ serializes a registered scorer's source, so it can't reference module helpers.
 from __future__ import annotations
 
 import json
+import os
 import re
 
 from eval_datasets import yes_no_label
@@ -28,6 +29,28 @@ from mlflow.genai.scorers import (
     Safety,
     scorer,
 )
+
+
+# --------------------------------------------------------------------------- #
+# judge model
+# --------------------------------------------------------------------------- #
+# Every LLM judge runs on a model that outranks the agents it grades (Sonnet / Llama /
+# GPT-OSS answer, Gemma translates): Opus. run_eval / reference_baseline / monitor take
+# --judge-model (DABs var.judge_model) and export it as MYGPT_JUDGE_MODEL, which
+# gold_correctness reads at call time (a module-level @scorer has no constructor).
+DEFAULT_JUDGE_MODEL = "databricks:/databricks-claude-opus-5-5"
+
+
+def judge_model() -> str:
+    return os.environ.get("MYGPT_JUDGE_MODEL") or DEFAULT_JUDGE_MODEL
+
+
+def check_judge_outranks(agent_alias: str, judge: str) -> None:
+    """Fail fast unless the judge is an Opus-class model and the agent isn't."""
+    if "opus" not in judge.lower():
+        raise ValueError(f"judge model {judge!r} must be an Opus-class endpoint (it must outrank the agent's models)")
+    if "opus" in (agent_alias or "").lower():
+        raise ValueError(f"agent model {agent_alias!r} is Opus-class: no higher-tier judge is configured")
 
 
 # --------------------------------------------------------------------------- #
@@ -374,45 +397,45 @@ def gold_correctness(inputs, outputs, expectations) -> Feedback | None:
     return is_correct(
         request=_question(inputs), response=answer_text(outputs),
         expected_facts=facts or None, expected_response=None if facts else response,
-        name="gold_correctness",
+        name="gold_correctness", model=judge_model(),
     )
 
 
 # --------------------------------------------------------------------------- #
 # scorer sets per use case
 # --------------------------------------------------------------------------- #
-_GROUNDING_GUIDELINES = Guidelines(
-    name="mygpt_grounding",
-    guidelines=[
-        "The response only states facts that are supported by the documents the assistant retrieved; "
-        "if the documents don't cover the question, it says so instead of guessing.",
-        # Natural language only: "the language of the question" alone made the judge read it as
-        # "follows the question's instructions" (84/210 FR rows failed on v15, 2026-10-17).
-        "The response is written in the same natural language as the user's question (e.g. English "
-        "or French), even when the source documents are in another language.",
-    ],
-)
+_GROUNDING_GUIDELINES = [
+    "The response only states facts that are supported by the documents the assistant retrieved; "
+    "if the documents don't cover the question, it says so instead of guessing.",
+    # Natural language only: "the language of the question" alone made the judge read it as
+    # "follows the question's instructions" (84/210 FR rows failed on v15, 2026-10-17).
+    "The response is written in the same natural language as the user's question (e.g. English "
+    "or French), even when the source documents are in another language.",
+]
 
 
-def judges() -> list:
+def judges(model: str | None = None) -> list:
+    model = model or judge_model()
     return [
-        RetrievalGroundedness(), RetrievalRelevance(), RelevanceToQuery(), Safety(),
-        ExpectationsGuidelines(), _GROUNDING_GUIDELINES,
+        RetrievalGroundedness(model=model), RetrievalRelevance(model=model), RelevanceToQuery(model=model),
+        Safety(model=model), ExpectationsGuidelines(model=model),
+        Guidelines(name="mygpt_grounding", guidelines=_GROUNDING_GUIDELINES, model=model),
     ]
 
 
-def scorers_for(use_case: str, vocab: list[str] | None = None) -> list:
+def scorers_for(use_case: str, vocab: list[str] | None = None, judge_model: str | None = None) -> list:
+    judges_ = judges(judge_model)
     shared = [retrieval_ok, mygpt_trust, focus_adherence]
     if use_case == "sj_global":
-        return judges() + shared + [yes_no_format, answer_label, yes_no_correct, gold_correctness]
+        return judges_ + shared + [yes_no_format, answer_label, yes_no_correct, gold_correctness]
     if use_case == "bluesky":
         extra = [make_vocab_compliance(vocab)] if vocab else []
-        return judges() + shared + [
+        return judges_ + shared + [
             js_array_valid, figure_ref_format, kinase_in_context,
             expression_system_correct, figure_ref_match, gold_correctness,
         ] + extra
     if use_case == "bioasq":
         # No focus_adherence (library-wide retrieval) and no yes_no_format (87 of the 163
         # are factoid questions); yes_no_correct / factoid_match skip the other type.
-        return judges() + [retrieval_ok, mygpt_trust, yes_no_correct, factoid_match, gold_correctness]
+        return judges_ + [retrieval_ok, mygpt_trust, yes_no_correct, factoid_match, gold_correctness]
     raise ValueError(f"Unknown use case {use_case!r}")

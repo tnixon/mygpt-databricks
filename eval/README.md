@@ -84,6 +84,12 @@ gold, mark the row instead (as `gold_scope: label_only` does), or rebuild the da
 - **Judges:** `RetrievalGroundedness`, `RetrievalRelevance`, `RelevanceToQuery`, `Safety`,
   `ExpectationsGuidelines`, `mygpt_grounding` (Guidelines). These read the retrieved
   context from the agent's RETRIEVER span (Document-shaped).
+- **Judge model:** every LLM judge, including `gold_correctness`, in offline evals, the
+  reference baseline and production monitoring, runs on `var.judge_model`
+  (`databricks-claude-opus-5-5`). That puts it above every model it grades: Sonnet 5,
+  Llama 4 Maverick, GPT-OSS, Gemma and MyGPT's gpt-oss-20b. Each job passes it as
+  `--judge-model`, and runs are tagged `mygpt.eval.judge_model`.
+  `scorers.check_judge_outranks` refuses to run with a judge that is not Opus-class.
 - **Shared:** `retrieval_ok`, `mygpt_trust` (QRS / ARS / HI as numeric feedback),
   `focus_adherence` (not for BioASQ, which has no focus).
 - **SJ Global:** `yes_no_format`, `answer_label` → logged as the `coding_matrix.json`

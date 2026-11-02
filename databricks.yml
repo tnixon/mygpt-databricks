@@ -135,6 +135,9 @@ variables:
   fm_gptoss:
     description: Direct FMAPI gpt-oss endpoint (eval model matrix).
     default: databricks-gpt-oss-120b
+  judge_model:
+    description: FMAPI endpoint every LLM judge runs on (offline evals, reference baseline, monitoring). Must outrank the agents' models (Opus-class; eval/scorers.check_judge_outranks).
+    default: databricks-claude-opus-5-5
   rag_agent_model:
     description: UC model name (in catalog.schema) of the RAG ResponsesAgent.
     default: mygpt_rag_agent
@@ -618,6 +621,7 @@ resources:
                    "--experiment", "${resources.experiments.mygpt_rag_agent.name}",
                    "--max-rows", "{{job.parameters.max_rows}}", "--gate", "{{job.parameters.gate}}",
                    "--translate", "{{job.parameters.translate}}", "--endpoint", "${var.rag_agent_endpoint}",
+                   "--judge-model", "databricks:/${var.judge_model}",
                    "--docs-volume", "/Volumes/${var.catalog}/${var.schema}/${var.docs_volume}",
                    "--private-volume", "/Volumes/${var.catalog}/${var.schema}/${var.eval_private_volume}",
                    "--reference-volume", "/Volumes/${var.catalog}/${var.schema}/${var.reference_volume}"]
@@ -642,6 +646,7 @@ resources:
             parameters:
               ["--base-dir", "${workspace.file_path}", "--experiment", "${resources.experiments.mygpt_rag_agent.name}",
                "--judge", "{{job.parameters.judge}}",
+               "--judge-model", "databricks:/${var.judge_model}",
                "--docs-volume", "/Volumes/${var.catalog}/${var.schema}/${var.docs_volume}",
                "--private-volume", "/Volumes/${var.catalog}/${var.schema}/${var.eval_private_volume}",
                "--reference-volume", "/Volumes/${var.catalog}/${var.schema}/${var.reference_volume}"]
@@ -659,7 +664,8 @@ resources:
           spark_python_task:
             python_file: eval/monitor.py
             parameters:
-              ["--base-dir", "${workspace.file_path}", "--experiment", "${resources.experiments.mygpt_rag_agent.name}"]
+              ["--base-dir", "${workspace.file_path}", "--experiment", "${resources.experiments.mygpt_rag_agent.name}",
+               "--judge-model", "databricks:/${var.judge_model}"]
       environments:
         - environment_key: eval
           spec:

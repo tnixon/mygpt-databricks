@@ -275,6 +275,8 @@ def main() -> None:
     # parallelism near that and allow for queueing / cold starts rather than timing out.
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--predict-timeout", type=int, default=300, help="seconds per endpoint call")
+    # Every LLM judge runs on this model; it must outrank the agent's (scorers.check_judge_outranks).
+    ap.add_argument("--judge-model", default="databricks:/databricks-claude-opus-5-5")
     ap.add_argument("--git-sha", default="")
     # Full /Volumes paths of the deployment's docs / private ground-truth volumes ("" = defaults).
     ap.add_argument("--docs-volume", default="")
@@ -288,11 +290,13 @@ def main() -> None:
     # Must be set before mlflow reads them (at predict / evaluate time).
     os.environ["MLFLOW_GENAI_EVAL_MAX_WORKERS"] = str(args.workers)
     os.environ["MLFLOW_DEPLOYMENT_PREDICT_TIMEOUT"] = str(args.predict_timeout)
+    os.environ["MYGPT_JUDGE_MODEL"] = args.judge_model
     import eval_datasets
     import mlflow
     import scorers as sc
     from mlflow.genai import datasets
 
+    sc.check_judge_outranks(args.model, args.judge_model)
     eval_datasets.configure(args.docs_volume, args.private_volume, args.reference_volume)
     spec = eval_datasets.specs(args.catalog, args.schema)[args.dataset]
     mlflow.set_experiment(args.experiment)
@@ -313,12 +317,13 @@ def main() -> None:
             "mygpt.eval.model_alias": args.model, "mygpt.eval.endpoint": args.endpoint,
             "mygpt.eval.served_model": served or "", "mygpt.eval.git_sha": args.git_sha,
             "mygpt.eval.max_rows": str(args.max_rows), "mygpt.eval.translate": args.translate,
+            "mygpt.eval.judge_model": args.judge_model,
         })
         # The gates in force for this run, so the benchmarks dashboard can show pass / fail.
         gates_file = os.path.join(base, "eval", "gates.yaml")
         mlflow.log_params({f"gate/{m}": v for m, v in gates_for(spec.use_case, gates_file).items()})
         result = mlflow.genai.evaluate(
-            data=data, predict_fn=predict_fn, scorers=sc.scorers_for(spec.use_case, vocab), model_id=model_id,
+            data=data, predict_fn=predict_fn, scorers=sc.scorers_for(spec.use_case, vocab, args.judge_model), model_id=model_id,
         )
         metrics = dict(result.metrics)
         needed = ("hi_eq", "retrieval_groundedness") + (("answer_label",) if spec.use_case == "sj_global" else ())
