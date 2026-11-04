@@ -127,6 +127,9 @@ final flow — it fails AI Search validation; keep the index on `mygpt-bge-m3`.)
   (`kinase_literature`). Public benchmarks (BioASQ / PubMedQA / Open-RAG-Bench / QRS-ARS-cutoff) are deferred.
 - **Guidelines-only grading** (no gold answers yet): built-in judges + code scorers. Expectations
   tables leave room for SME-labelled `expected_facts` later.
+- **Judges outrank the agents** (St. Jude requirement, 2026-11-01): every LLM judge runs on
+  `var.judge_model` = Opus 5.5. The agents run Sonnet / Llama / GPT-OSS / Gemma.
+  `scorers.check_judge_outranks` enforces it.
 - **Corpus isolation = a `corpus` column** (the top-level docs-volume folder) on chunks + the index;
   the agent filters on `custom_inputs.corpus` (absent = all corpora, so the app is unchanged).
 - **One shared, DAB-managed experiment** `/Shared/mygpt/mygpt-rag-agent` for LoggedModels, eval runs

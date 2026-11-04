@@ -5,6 +5,10 @@
 # set just below the Phase-2 baseline (agent v10, Sonnet, 2026-10-09; see PLAN.md) so
 # later phases can't silently regress; `null` = tracked but not enforced.
 #
+# NOTE (2026-11-01): the judges now run on Opus 5.5 (var.judge_model). Before that they used
+# MLflow's default managed judge, which set the baselines below. Re-baseline the judge
+# thresholds (and gold_correctness) on Opus before enforcing them.
+#
 #   baseline (FR / ES):  retrieval_groundedness 0.638 / 0.633   relevance_to_query 0.990 / 1.000
 #                        expectations_guidelines 0.757 / 0.757  mygpt_grounding 0.800 / 0.705
 #                        yes_no_format 0.986 / 0.990            safety 1.000 / 1.000

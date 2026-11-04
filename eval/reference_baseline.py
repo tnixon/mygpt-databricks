@@ -163,6 +163,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--experiment", default="/Shared/mygpt/mygpt-rag-agent")
     ap.add_argument("--judge", default="true", help="false = code scorers only (no LLM judge calls)")
+    ap.add_argument("--judge-model", default="databricks:/databricks-claude-opus-5-5")
     ap.add_argument("--workers", type=int, default=4)
     # Full /Volumes paths of the deployment's docs / private ground-truth volumes ("" = defaults).
     ap.add_argument("--docs-volume", default="")
@@ -173,10 +174,13 @@ def main() -> None:
 
     base = _base_dir(args.base_dir)
     sys.path.insert(0, os.path.join(base, "eval"))
+    os.environ["MYGPT_JUDGE_MODEL"] = args.judge_model
     import eval_datasets
     import mlflow
     import pandas as pd
+    import scorers as sc
 
+    sc.check_judge_outranks("gpt-oss-20b", args.judge_model)  # MyGPT's answer model
     eval_datasets.configure(args.docs_volume, args.private_volume, args.reference_volume)
     if eval_datasets.private_dir(base) is None:
         print("[reference] St. Jude's private ground truths not found — BioASQ only")
@@ -188,7 +192,8 @@ def main() -> None:
 
     mlflow.set_experiment(args.experiment)
     with mlflow.start_run(run_name="mygpt-reference-baseline"):
-        mlflow.set_tags({"mygpt.eval.kind": "reference", "mygpt.eval.judge": str(judge).lower()})
+        mlflow.set_tags({"mygpt.eval.kind": "reference", "mygpt.eval.judge": str(judge).lower(),
+                         "mygpt.eval.judge_model": args.judge_model})
         mlflow.log_metrics(metrics)
         table = pd.DataFrame([
             {"use_case": r["use_case"], "config": r["config"], "key": r["key"], "question": r.get("question_id") or r.get("question_type"),

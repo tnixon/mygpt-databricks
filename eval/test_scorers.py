@@ -339,6 +339,41 @@ def test_scorer_sets_build():
     assert "yes_no_format" not in names and "focus_adherence" not in names
 
 
+# --- judge model: every LLM judge outranks the agents ------------------------ #
+_LLM_JUDGES = {"retrieval_groundedness", "retrieval_relevance", "relevance_to_query", "safety",
+               "expectations_guidelines", "mygpt_grounding"}
+
+
+@pytest.mark.parametrize("use_case", ["sj_global", "bluesky", "bioasq"])
+def test_llm_judges_use_judge_model(use_case, monkeypatch):
+    monkeypatch.delenv("MYGPT_JUDGE_MODEL", raising=False)
+    judges = [sc for sc in s.scorers_for(use_case, vocab=["E. coli"]) if sc.name in _LLM_JUDGES]
+    assert {sc.name for sc in judges} == _LLM_JUDGES
+    assert all(sc.model == s.DEFAULT_JUDGE_MODEL for sc in judges)
+    override = "databricks:/databricks-claude-opus-5"
+    assert all(sc.model == override for sc in s.scorers_for(use_case, judge_model=override) if sc.name in _LLM_JUDGES)
+
+
+def test_gold_correctness_uses_judge_model(monkeypatch):
+    import mlflow.genai.judges as judges
+
+    seen = {}
+    monkeypatch.setattr(judges, "is_correct", lambda **kw: seen.update(kw))
+    monkeypatch.setenv("MYGPT_JUDGE_MODEL", "databricks:/databricks-claude-opus-5")
+    s.gold_correctness(inputs={"input": [{"role": "user", "content": "q"}]}, outputs=_out("a"),
+                       expectations={"expected_facts": ["f"]})
+    assert seen["model"] == "databricks:/databricks-claude-opus-5"
+
+
+def test_check_judge_outranks():
+    for alias in ("sonnet", "llama", "gptoss", "gpt-oss-20b"):
+        s.check_judge_outranks(alias, s.DEFAULT_JUDGE_MODEL)
+    with pytest.raises(ValueError):
+        s.check_judge_outranks("sonnet", "databricks:/databricks-claude-sonnet-5")
+    with pytest.raises(ValueError):
+        s.check_judge_outranks("opus", s.DEFAULT_JUDGE_MODEL)
+
+
 # --- run_eval post-run helpers ---------------------------------------------- #
 import pandas as pd  # noqa: E402
 

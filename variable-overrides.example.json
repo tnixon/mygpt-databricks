@@ -26,6 +26,7 @@
   "fm_sonnet": "databricks-claude-sonnet-5",
   "fm_llama": "databricks-llama-4-maverick",
   "fm_gptoss": "databricks-gpt-oss-120b",
+  "judge_model": "databricks-claude-opus-5-5",
   "rag_agent_model": "mygpt_rag_agent",
   "rag_agent_endpoint": "mygpt-rag-agent",
   "supervisor_model": "mygpt_supervisor",
