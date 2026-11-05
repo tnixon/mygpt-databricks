@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from datetime import timedelta
 
 import mlflow
 import mlflow.sentence_transformers
@@ -81,8 +82,9 @@ def main() -> None:
 
     # AI Gateway usage tracking: request counts (incl. Vector Search's embedding calls) land in
     # system.serving.endpoint_usage for the cost dashboard. The gateway config can't change while
-    # the endpoint is updating, so wait for the config update above to settle first.
-    w.serving_endpoints.wait_get_serving_endpoint_not_updating(args.endpoint_name)
+    # the endpoint is updating, so wait for the config update above to settle first. A GPU
+    # rollout can take well over the SDK's default 20 minutes (2026-11-04: 35+ min).
+    w.serving_endpoints.wait_get_serving_endpoint_not_updating(args.endpoint_name, timeout=timedelta(minutes=90))
     w.serving_endpoints.put_ai_gateway(
         name=args.endpoint_name, usage_tracking_config=AiGatewayUsageTrackingConfig(enabled=True),
     )
