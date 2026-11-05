@@ -32,7 +32,7 @@ KINASE_PDFS ?=   # dir of St. Jude's kinase PDFs, named <pubmed_id>.pdf (not in 
 
 .PHONY: help init config submodules submodules-update install dev build typecheck lint test \
 	validate deploy deploy-platform deploy-app app-run secrets langsmith-secret gateways agents summary app-logs \
-	clean eval-corpus reference-csvs corpus-hi eval-private eval-test
+	clean eval-corpus reference-csvs corpus-hi eval-private eval-test diagrams
 # Job chains (gateways, agents) must run in order, and deploy-platform must finish first.
 .NOTPARALLEL:
 
@@ -73,6 +73,9 @@ lint: ## Lint the app
 
 test: ## Run app tests
 	cd $(APP_DIR) && pnpm test
+
+diagrams: ## Render docs/diagrams/*.mmd to SVG + PNG (ARCHITECTURE.md; needs node + Chrome)
+	docs/diagrams/render.sh
 
 # ---------------------------------------------------------------- deployment (DEPLOYMENT.md)
 # Both bundles: platform (repo root) owns the jobs / volumes / Lakebase, app/ owns the App.

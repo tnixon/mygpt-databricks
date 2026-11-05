@@ -1,5 +1,7 @@
 # MyGPT — Databricks resource inventory
 
+How these resources connect: see the diagrams in **[ARCHITECTURE.md](ARCHITECTURE.md)**, which use the same names.
+
 Every Databricks resource that MyGPT deploys or uses. Names come from the bundle variables. The
 values shown are the current deployment's, taken from `.databricks/bundle/default/variable-overrides.json`
 and `app/.databricks/bundle/default/variable-overrides.json`, which `make config` installs from the
@@ -128,7 +130,7 @@ The app's service principal creates and owns the `mygpt` schema (`pg_schema`) on
 | `mygpt_tools.search_pdb` | UC function (uses `rcsb_search` / `rcsb_data`) | job (`mygpt_deploy_tools`) | Full-text search of the PDB. |
 | `mygpt_tools.get_pdb_details` | UC function (uses `rcsb_data`) | job (`mygpt_deploy_tools`) | Returns details of one PDB entry. |
 | Managed MCP over `structural_biology.mygpt_tools` | Databricks managed MCP server | Databricks (built in) | Exposes the functions above to the Supervisor as tools. |
-| "MyGPT structured data" (`genie_title`) | Genie space | job (`mygpt_deploy_genie`; found by title) | Natural-language SQL over `kinome`, `kinase_papers` and `corpus_documents`. The Supervisor routes structured-data questions here. |
+| "MyGPT structured data" (`genie_title`; ID `01f1c8e7192f12ee9aa687a1ff463507`) | Genie space | job (`mygpt_deploy_genie`; found by title) | Natural-language SQL over `kinome`, `kinase_papers` and `corpus_documents`. The Supervisor routes structured-data questions here. |
 
 ## 5. Model Serving and AI Gateway endpoints
 

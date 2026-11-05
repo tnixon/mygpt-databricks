@@ -1,0 +1,55 @@
+---
+config:
+  layout: elk
+  elk:
+    nodePlacementStrategy: BRANDES_KOEPF
+---
+flowchart LR
+  %% 01 ETL: governed corpus PDFs -> section chunks -> corpus vector index (job mygpt_etl)
+  docs[("docs<br/><i>UC volume</i><br/>/Volumes/structural_biology/mygpt/docs/&lt;corpus&gt;/")]:::vol
+  reference[("reference<br/><i>UC volume</i><br/>MyGPT-evaluations CSVs")]:::vol
+
+  subgraph etl["mygpt_etl · job 761945995429746 · SQL tasks on warehouse 79388385e899d08b"]
+    direction TB
+    landing["landing<br/><i>SQL task</i>"]:::job
+    parse["parse_chunk_index<br/><i>SQL task · ai_parse_document</i>"]:::job
+    fallback["parse_fallback<br/><i>Python task · PyMuPDF</i>"]:::job
+    merge["chunk_merge<br/><i>SQL task · ~1000-char section chunks</i>"]:::job
+    config["sections_and_config<br/><i>SQL task</i>"]:::job
+    sync["sync_index<br/><i>Python task</i>"]:::job
+    seed["structured_seed<br/><i>Python task</i>"]:::job
+    landing --> parse --> fallback --> merge
+    merge --> config & sync & seed
+  end
+
+  subgraph out["structural_biology.mygpt · tables"]
+    direction TB
+    documents["documents<br/><i>FILE EXTERNAL table</i>"]:::tbl
+    parselog["doc_parse_log<br/><i>parsed versions</i>"]:::tbl
+    stage["_doc_elements_stage<br/><i>staging</i>"]:::tbl
+    quality["doc_parse_quality<br/><i>fallback flags</i>"]:::tbl
+    elements["doc_elements"]:::tbl
+    chunks["doc_chunks<br/><i>Change Data Feed on</i>"]:::tbl
+    sections["paper_sections<br/><i>section catalogue</i>"]:::tbl
+    cfg["dataset_config<br/>embedding_model_cutoffs<br/>reranker_config"]:::tbl
+    genie_tbls["kinome · kinase_papers<br/>corpus_documents <i>(view)</i>"]:::tbl
+  end
+
+  subgraph vs["mygpt-vs · Vector Search endpoint"]
+    direction TB
+    index{{"doc_chunks_corpus_index<br/><i>Delta Sync · TRIGGERED</i>"}}:::idx
+    legacy{{"doc_chunks_index<br/><i>Phase-1 · still syncing, unused</i>"}}:::idx
+  end
+  bge["mygpt-bge-m3<br/><i>serving endpoint · GPU_SMALL</i>"]:::ep
+
+  docs --> landing
+  landing --> documents
+  parse --> parselog & stage
+  fallback --> stage & quality
+  merge --> elements & chunks & sections
+  config --> cfg
+  reference --> seed
+  seed --> genie_tbls
+  sync -- "sync + wait" --> index
+  chunks -. "change feed" .-> index & legacy
+  index -- "managed embeddings" --> bge

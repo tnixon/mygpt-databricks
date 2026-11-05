@@ -2,6 +2,8 @@
 
 Rebuild of St. Jude's **MyGPT** research assistant, natively on Databricks. One repo for all POC components — the app, data ingestion, the agent layer, and evaluation.
 
+Architecture diagrams (ETL, agent flow, data, upload libraries, eval, model routing): **[ARCHITECTURE.md](ARCHITECTURE.md)**. Every deployed resource: **[INVENTORY.md](INVENTORY.md)**.
+
 ## Layout
 | Folder | What | Stack |
 |---|---|---|

@@ -1,0 +1,53 @@
+---
+config:
+  layout: elk
+---
+flowchart LR
+  %% 06 Model & gateway routing: every model call, gateway vs direct, credentials and telemetry
+  subgraph callers["Callers"]
+    direction TB
+    appd["st-jude-mygpt · direct chat<br/><i>OBO user · usage_context app-direct</i>"]:::app
+    appq["st-jude-mygpt · upload search<br/><i>app SP</i>"]:::app
+    sup["mygpt-supervisor<br/><i>endpoint SP</i>"]:::ep
+    rag["mygpt-rag-agent<br/><i>endpoint SP</i>"]:::ep
+    ingest["mygpt_upload_ingest<br/><i>job run-as</i>"]:::job
+    vsidx{{"doc_chunks_corpus_index<br/><i>on mygpt-vs</i>"}}:::idx
+    evals["mygpt_eval · mygpt_eval_reference<br/>Trace Metrics job<br/><i>job run-as</i>"]:::job
+  end
+
+  subgraph gws["AI Gateway endpoints (usage-tracked)"]
+    direction TB
+    chat["mygpt-chat<br/><i>llm/v1/chat · 60 calls/min/user<br/>inference table mygpt_chat_payload</i>"]:::gw
+    translate["mygpt-translate<br/><i>llm/v1/chat · 60 calls/min/user<br/>inference table mygpt_translate_payload</i>"]:::gw
+    emb["mygpt-embeddings<br/><i>llm/v1/embeddings</i>"]:::gw
+  end
+
+  subgraph fmx["FMAPI · pay-per-token (shared)"]
+    direction TB
+    sonnet["databricks-claude-sonnet-5"]:::fm
+    gemma["databricks-gemma-3-12b"]:::fm
+    llama["databricks-llama-4-maverick"]:::fm
+    gptoss["databricks-gpt-oss-120b"]:::fm
+    opus["databricks-claude-opus-5-5"]:::fm
+  end
+  bge["mygpt-bge-m3<br/><i>custom endpoint · UC model bge_m3<br/>GPU_SMALL · always on</i>"]:::ep
+  azure(["Azure AI Foundry<br/><i>0% traffic fallback · not configured</i>"]):::ext
+  secret["mygpt / gw_upstream_token<br/><i>secret: gateway → upstream auth</i>"]:::note
+  usage[("system.serving.endpoint_usage<br/><i>requests + tokens per caller</i>")]:::ext
+
+  appd -- "AppKit serving plugin" --> sonnet & llama & gptoss
+  appq -- "embed question" --> emb
+  sup -- "router + merge LLM" --> chat
+  rag -- "generate (model=sonnet)" --> chat
+  rag -- "translate" --> translate
+  rag -- "answer embeddings" --> emb
+  rag -. "generate (model=llama / gptoss)" .-> llama & gptoss
+  ingest -- "embed chunks" --> emb
+  vsidx -- "managed embeddings (gateways not supported)" --> bge
+  evals -- "LLM judges" --> opus
+  chat --> sonnet
+  chat -. "fallback" .-> azure
+  translate --> gemma
+  emb --> bge
+  secret -.- chat & translate & emb
+  gws -. "usage tracking" .-> usage
