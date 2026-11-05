@@ -14,7 +14,7 @@ translate fronts the RAG agent's query/answer translation (gemma-3-12b is the ba
 of MyGPT's translategemma), so the translator can be swapped without redeploying the agent.
 
 For chat and translate the driver also sets the AI Gateway features (usage tracking, an inference table
-in <catalog>.<schema>, a per-user rate limit). Passing --azure-endpoint adds St. Jude's
+in <catalog>.<schema>, a per-user rate limit); for embeddings, usage tracking only. Passing --azure-endpoint adds St. Jude's
 Azure AI Foundry deployment as a second served entity at 0% traffic with fallback on, so
 FMAPI stays primary and Azure takes over on upstream errors. Phase-5 spike (2026-10-15):
 tools / tool_calls pass through this provider unchanged.
@@ -165,6 +165,14 @@ def main() -> None:
         print(f"AI Gateway on {endpoint_name}: usage tracking, inference table "
               f"{args.catalog}.{args.schema}.{endpoint_name.replace('-', '_')}_payload, "
               f"{args.user_calls_per_minute} calls/min/user, fallback={'on' if azure else 'off'}")
+    else:
+        # embeddings: usage tracking only (requests + tokens in system.serving.endpoint_usage, read by
+        # the cost dashboard). No rate limit: ingest embeds in bursts. No inference table: the
+        # payloads are just document chunks.
+        w.serving_endpoints.put_ai_gateway(
+            name=endpoint_name, usage_tracking_config=AiGatewayUsageTrackingConfig(enabled=True),
+        )
+        print(f"AI Gateway on {endpoint_name}: usage tracking")
 
 
 if __name__ == "__main__":

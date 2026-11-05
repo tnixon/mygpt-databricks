@@ -68,7 +68,10 @@ LLM_ENDPOINT = os.environ.get("MYGPT_SUPERVISOR_LLM", "mygpt-chat")
 RAG_ENDPOINT = os.environ.get("MYGPT_RAG_ENDPOINT", "mygpt-rag-agent")
 GENIE_SPACE_ID = os.environ.get("MYGPT_GENIE_SPACE_ID", "")
 TOOLS_SCHEMA = os.environ.get("MYGPT_TOOLS_SCHEMA", "structural_biology.mygpt_tools")
-CORPORA = [c for c in os.environ.get(
+# Tags the LLM calls in system.serving.endpoint_usage for the cost dashboard (dashboards/README.md).
+# Not sent to mygpt-rag-agent: that's an agent endpoint, not a chat model.
+USAGE_CONTEXT = {"project": "mygpt", "component": "supervisor"}
+CORPORA =[c for c in os.environ.get(
     "MYGPT_CORPORA", "biomed,kinase_literature,health_policies_fr,health_policies_es,health_policies_hi").split(",") if c]
 
 MAX_STEPS = int(os.environ.get("MYGPT_SUPERVISOR_MAX_STEPS", "4"))
@@ -129,7 +132,7 @@ class Transport:
         return self._ws
 
     def chat(self, messages: list[dict], tools: list[dict] | None, tool_choice: str = "auto") -> dict:
-        body: dict[str, Any] = {"messages": messages, "max_tokens": MAX_TOKENS}
+        body: dict[str, Any] = {"messages": messages, "max_tokens": MAX_TOKENS, "usage_context": USAGE_CONTEXT}
         if tools:
             body["tools"] = tools
             body["tool_choice"] = tool_choice

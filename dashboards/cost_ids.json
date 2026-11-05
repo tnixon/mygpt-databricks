@@ -1,0 +1,16 @@
+{
+  "genie_space_id": "01f1c8e7192f12ee9aa687a1ff463507",
+  "vs_pipeline_ids": [
+    "0ad9f206-0079-4c94-b57c-4310b7c5c79e",
+    "a574e68a-cbaa-4f0c-8015-12f212d5e9de"
+  ],
+  "pg_project_uid": "1ac0fd6b-c664-4fcb-9148-f974fc1e7761",
+  "app_id": "9d9f4c68-7311-4bfb-8813-61fd786c00ac",
+  "app_sp_client_id": "9d9f4c68-7311-4bfb-8813-61fd786c00ac",
+  "experiment_id": "2750091371639406",
+  "dashboard_ids": {
+    "benchmarks": "01f1c89fd2dc1a41944bc76a54244c5f",
+    "costs": "01f1d8d8cdcc1d479d90d8024d923fa5"
+  },
+  "extra_requesters": []
+}

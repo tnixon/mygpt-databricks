@@ -136,6 +136,10 @@ To change it, edit `dashboards/sql/*.sql` and the layout in `dashboards/build_da
 run `python3 dashboards/build_dashboard.py` and `bundle deploy`. `sql/base.sql` holds the
 benchmark ↔ MyGPT-metric mapping. Don't hand-edit the generated `.lvdash.json`.
 
+A second dashboard, **"[mygpt] Costs — usage and spend per component"**, tracks what MyGPT
+costs, eval included: the judges, the eval jobs and the trace-metrics job are its `eval` lifecycle.
+See `dashboards/README.md` for its pages, its attribution rules and how to rebuild it.
+
 ## Run
 ```bash
 make eval-test                                                  # local unit tests
