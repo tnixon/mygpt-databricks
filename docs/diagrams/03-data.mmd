@@ -1,0 +1,79 @@
+---
+config:
+  layout: elk
+---
+flowchart LR
+  %% 03 Data architecture: where every dataset lives and what produces / consumes it
+  subgraph uc["Unity Catalog · structural_biology.mygpt"]
+    direction LR
+    subgraph vols["Volumes"]
+      direction TB
+      docs[("docs<br/><i>corpus PDFs, one folder per corpus</i>")]:::vol
+      uploads[("uploads<br/><i>&lt;library_id&gt;/&lt;doc_id&gt;__&lt;file&gt;</i>")]:::vol
+      reference[("reference<br/><i>MyGPT-evaluations CSVs</i>")]:::vol
+      private[("eval_private<br/><i>restricted · SME ground truths</i>")]:::vol
+    end
+    subgraph corpus["Corpus tables"]
+      direction TB
+      documents["documents<br/><i>FILE EXTERNAL</i>"]:::tbl
+      work["doc_parse_log · doc_parse_quality<br/>_doc_elements_stage · doc_elements"]:::tbl
+      chunks["doc_chunks"]:::tbl
+      sections["paper_sections"]:::tbl
+    end
+    cfg["dataset_config · embedding_model_cutoffs<br/>reranker_config"]:::tbl
+    gt["kinome · kinase_papers<br/>corpus_documents <i>(view)</i>"]:::tbl
+    evalds["eval_health_policies_fr · _es · _hi<br/>eval_kinase_literature · eval_bioasq<br/><i>UC-backed MLflow eval datasets</i>"]:::tbl
+    payload["mygpt_chat_payload · mygpt_translate_payload<br/>mygpt_rag_agent_payload · mygpt_supervisor_payload<br/><i>inference tables</i>"]:::tbl
+    models["bge_m3 · mygpt_rag_agent · mygpt_supervisor<br/><i>UC registered models</i>"]:::ml
+  end
+
+  subgraph vsx["mygpt-vs · Vector Search endpoint"]
+    direction TB
+    index{{"doc_chunks_corpus_index"}}:::idx
+    legacy{{"doc_chunks_index <i>(Phase 1, unused)</i>"}}:::idx
+  end
+
+  subgraph tools_s["Unity Catalog · structural_biology.mygpt_tools"]
+    direction TB
+    fns["pubmed_ids_from_text · pubmed_summary<br/>search_pdb_by_gene · search_pdb · get_pdb_details<br/><i>UC functions</i>"]:::fn
+    conns["rcsb_search · rcsb_data · ncbi_eutils<br/><i>UC HTTP connections</i>"]:::fn
+  end
+
+  subgraph lbx["Lakebase · projects/mygpt → production → databricks_postgres.mygpt (RLS)"]
+    direction TB
+    libs["libraries"]:::lb
+    libdocs["library_documents"]:::lb
+    upchunks["upload_chunks<br/><i>pgvector HNSW + tsvector GIN</i>"]:::lb
+    runs["ingest_runs"]:::lb
+    conv["conversations"]:::lb
+    qs["questions"]:::lb
+    ans["answers"]:::lb
+    src["sources"]:::lb
+    fb["feedback"]:::lb
+    libs --> libdocs --> upchunks
+    libs --> runs
+    conv --> qs --> ans --> src
+    ans --> fb
+  end
+
+  exp["/Shared/mygpt/mygpt-rag-agent · 2750091371639406<br/><i>MLflow: LoggedModels, eval runs, traces, assessments</i>"]:::ml
+  sys[("system.billing · system.serving · system.query<br/>system.lakeflow · system.access · system.mlflow<br/><i>system tables</i>")]:::ext
+  dash["Benchmarks · Costs<br/><i>AI/BI dashboards</i>"]:::app
+  eps["mygpt-bge-m3 · mygpt-rag-agent · mygpt-supervisor<br/>mygpt-chat · mygpt-translate<br/><i>serving endpoints</i>"]:::ep
+
+  docs -- "mygpt_etl" --> documents --> work --> chunks
+  work --> sections
+  chunks -- "Delta Sync" --> index
+  chunks -.-> legacy
+  chunks -. "counts" .-> gt
+  reference -- "structured_seed" --> gt
+  reference & private & docs -- "mygpt_eval_build_datasets" --> evalds
+  uploads -- "mygpt_upload_ingest" --> upchunks
+  fns --> conns
+  models -- "served by" --> eps
+  eps -- "AI Gateway / agents.deploy" --> payload
+  eps -- "traces" --> exp
+  evalds -- "mygpt_eval" --> exp
+  fb -. "user_rating assessment" .-> exp
+  cfg -. "optional live config" .-> eps
+  sys & exp --> dash

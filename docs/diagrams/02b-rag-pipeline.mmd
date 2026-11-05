@@ -1,0 +1,42 @@
+---
+config:
+  layout: elk
+---
+flowchart LR
+  %% 02b Inside mygpt-rag-agent (agents/rag_agent/agent.py): one request, step by step
+  req(["request from mygpt-supervisor or mygpt_eval<br/><i>custom_inputs: corpus, sources?, model, k</i>"]):::user
+
+  subgraph agent["mygpt-rag-agent · ResponsesAgent (UC model mygpt_rag_agent)"]
+    direction LR
+    cfgstep["1 · dataset config<br/><i>packaged defaults</i>"]:::job
+    tr["2 · translate query<br/><i>non-English corpora only</i>"]:::job
+    retr{"3 · retrieve"}:::job
+    rerank["4 · rerank<br/><i>in-process cross-encoder</i><br/>qnli-electra-base · mmarco-mMiniLMv2"]:::job
+    qrs["5 · QRS<br/><i>vector + BM25 + rerank</i>"]:::job
+    gen["6 · generate"]:::job
+    score["7 · score answer<br/><i>ARS · NLI (nli-deberta-v3-base)<br/>HI equation + random forest</i>"]:::job
+    cfgstep --> tr --> retr --> rerank --> qrs --> gen --> score
+  end
+
+  cfgtbl["dataset_config · embedding_model_cutoffs · reranker_config<br/><i>UC tables</i>"]:::tbl
+  translate["mygpt-translate<br/><i>AI Gateway → databricks-gemma-3-12b</i>"]:::gw
+  index{{"doc_chunks_corpus_index<br/><i>on mygpt-vs · HYBRID</i>"}}:::idx
+  provided(["provided sources<br/><i>upload-library hits from the app</i>"]):::user
+  chat["mygpt-chat<br/><i>AI Gateway → databricks-claude-sonnet-5</i>"]:::gw
+  direct["databricks-llama-4-maverick<br/>databricks-gpt-oss-120b<br/><i>FMAPI, direct</i>"]:::fm
+  emb["mygpt-embeddings<br/><i>AI Gateway → mygpt-bge-m3</i>"]:::gw
+  exp["/Shared/mygpt/mygpt-rag-agent<br/><i>MLflow traces</i>"]:::ml
+  ls(["LangSmith<br/><i>optional mirror</i>"]):::ext
+  out(["answer, sources, qrs, ars, hi_eq, hi_rf, trace_id"]):::user
+
+  req --> cfgstep
+  cfgtbl -. "only if MYGPT_WAREHOUSE_ID is set (not in the deployed agent)" .-> cfgstep
+  tr -- "POST /invocations" --> translate
+  retr -- "corpus libraries: filters corpus / source_name / section" --> index
+  provided -- "upload libraries: skip Vector Search" --> retr
+  gen -- "model=sonnet (default)" --> chat
+  gen -. "model=llama / gptoss (eval matrix)" .-> direct
+  score -- "answer embeddings" --> emb
+  score --> out
+  agent -- "RETRIEVER / LLM spans" --> exp
+  agent -. "if langsmith_api_key secret exists" .-> ls

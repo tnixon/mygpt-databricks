@@ -1,0 +1,47 @@
+---
+config:
+  layout: elk
+---
+flowchart LR
+  %% 05 Evaluation & monitoring: offline evals, the MyGPT baseline, production monitoring, dashboards
+  subgraph inputs["UC volumes · structural_biology.mygpt"]
+    direction TB
+    reference[("reference<br/><i>questions, public gold</i>")]:::vol
+    private[("eval_private<br/><i>SME ground truths</i>")]:::vol
+    docs[("docs<br/><i>eval corpora</i>")]:::vol
+  end
+
+  build["mygpt_eval_build_datasets<br/><i>job 577968562754939</i>"]:::job
+  evalds["eval_health_policies_fr · _es · _hi<br/>eval_kinase_literature · eval_bioasq<br/><i>UC eval datasets</i>"]:::tbl
+  evaljob["mygpt_eval<br/><i>job 84251565370622 · for-each dataset × model</i>"]:::job
+  refjob["mygpt_eval_reference<br/><i>job 274637418766234 · MyGPT's recorded answers</i>"]:::job
+  monjob["mygpt_eval_monitor<br/><i>job 1097559855392953 · registers scorers</i>"]:::job
+  trace["[2750091371639406] Trace Metrics Computation Job<br/><i>job 488240277362123 · MLflow-managed</i>"]:::job
+
+  rag["mygpt-rag-agent<br/><i>agent serving endpoint</i>"]:::ep
+  sup["mygpt-supervisor<br/><i>agent serving endpoint</i>"]:::ep
+  app["st-jude-mygpt<br/><i>app · user feedback</i>"]:::app
+  judge["databricks-claude-opus-5-5<br/><i>FMAPI · LLM judge</i>"]:::fm
+  gates["eval/gates.yaml<br/><i>quality gates</i>"]:::note
+
+  exp["/Shared/mygpt/mygpt-rag-agent · 2750091371639406<br/><i>MLflow experiment: eval runs, traces, assessments</i>"]:::ml
+  sysml[("system.mlflow.runs_latest<br/>system.mlflow.experiments_latest")]:::ext
+  bench["[mygpt] Benchmarks — MyGPT vs Databricks agent<br/><i>AI/BI dashboard</i>"]:::app
+  ls(["LangSmith<br/><i>optional trace mirror</i>"]):::ext
+
+  reference & private & docs --> build --> evalds
+  evalds --> evaljob
+  evaljob -- "predict (copies the trace)" --> rag
+  evaljob -- "judge scorers" --> judge
+  gates -.-> evaljob
+  evaljob -- "metrics, gate results" --> exp
+  reference & private --> refjob
+  refjob -- "same scorers + judge" --> judge
+  refjob -- "mygpt_ref/* metrics" --> exp
+  monjob -- "Safety · RelevanceToQuery · RetrievalGroundedness (10% sample)" --> exp
+  exp -- "schedule" --> trace
+  trace -- "judge production traces" --> judge
+  rag & sup -- "production traces" --> exp
+  app -- "user_rating assessments" --> exp
+  rag & sup -.-> ls
+  exp --> sysml --> bench

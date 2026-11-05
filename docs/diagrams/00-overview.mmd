@@ -1,0 +1,61 @@
+---
+config:
+  layout: elk
+---
+flowchart TB
+  %% 00 Overview: every major component on one page; details in diagrams 01-06
+  user(["St. Jude user<br/><i>browser</i>"]):::user
+  app["st-jude-mygpt<br/><i>Databricks App (AppKit)</i>"]:::app
+
+  subgraph agents["Agents"]
+    direction LR
+    sup["mygpt-supervisor<br/><i>agent serving endpoint</i>"]:::ep
+    rag["mygpt-rag-agent<br/><i>agent serving endpoint</i>"]:::ep
+    genie["MyGPT structured data<br/><i>Genie space</i>"]:::fn
+    tools["structural_biology.mygpt_tools<br/><i>UC functions · managed MCP</i>"]:::fn
+  end
+
+  subgraph models["Models"]
+    direction LR
+    gws["mygpt-chat · mygpt-translate<br/>mygpt-embeddings<br/><i>AI Gateway endpoints</i>"]:::gw
+    fm["sonnet-5 · llama-4-maverick · gpt-oss-120b<br/>gemma-3-12b · claude-opus-5-5<br/><i>FMAPI pay-per-token</i>"]:::fm
+    bge["mygpt-bge-m3<br/><i>custom endpoint · GPU</i>"]:::ep
+  end
+
+  subgraph data["Data"]
+    direction LR
+    uc[("structural_biology.mygpt<br/><i>UC volumes + tables</i>")]:::tbl
+    vs{{"doc_chunks_corpus_index<br/><i>on mygpt-vs</i>"}}:::idx
+    lb[("projects/mygpt<br/><i>Lakebase · app state, upload index</i>")]:::lb
+  end
+
+  subgraph ops["Pipelines & ops"]
+    direction LR
+    etl["mygpt_etl<br/><i>corpus ETL job</i>"]:::job
+    ingest["mygpt_upload_ingest<br/><i>upload ingest job</i>"]:::job
+    evals["mygpt_eval* jobs<br/>Trace Metrics job"]:::job
+    exp["/Shared/mygpt/mygpt-rag-agent<br/><i>MLflow experiment</i>"]:::ml
+    dash["Benchmarks · Costs<br/><i>AI/BI dashboards</i>"]:::app
+  end
+  ext(["RCSB PDB · NCBI<br/><i>public APIs</i>"]):::ext
+
+  user -- "HTTPS (OBO)" --> app
+  app -- "grounded ask" --> sup
+  app -. "direct chat" .-> fm
+  app -- "state + upload search" --> lb
+  app -- "run-now" --> ingest
+  sup -- "documents" --> rag
+  sup -- "structured data" --> genie
+  sup -- "domain tools" --> tools
+  tools --> ext
+  sup & rag -- "LLM, translate, embed" --> gws
+  gws --> fm & bge
+  rag -- "HYBRID query" --> vs
+  vs -- "embeddings" --> bge
+  genie -- "SQL" --> uc
+  etl -- "parse + chunk" --> uc
+  uc -- "Delta Sync" --> vs
+  ingest -- "chunks + vectors" --> lb
+  evals -- "predict + judge" --> rag
+  sup & rag -. "traces" .-> exp
+  evals --> exp --> dash

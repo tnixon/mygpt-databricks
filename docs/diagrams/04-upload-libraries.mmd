@@ -1,0 +1,41 @@
+sequenceDiagram
+  %% 04 Upload libraries: a user's own documents -> Lakebase index -> question-time hybrid search
+  autonumber
+  actor U as User (browser)
+  participant A as st-jude-mygpt<br/>Databricks App
+  participant V as uploads<br/>UC volume
+  participant L as projects/mygpt<br/>Lakebase (databricks_postgres.mygpt)
+  participant J as mygpt_upload_ingest<br/>job 352016610803853
+  participant E as mygpt-embeddings<br/>AI Gateway → mygpt-bge-m3
+  participant S as mygpt-supervisor → mygpt-rag-agent<br/>agent endpoints
+
+  rect rgb(240, 247, 252)
+    Note over U,J: Upload and ingest
+    U->>A: POST /api/libraries/:id/documents (≤ 50 MB per file)
+    A->>V: PUT uploads/<library_id>/<doc_id>__<file> (Files API, app SP)
+    A->>L: insert library_documents (status uploaded)
+    A->>L: library status ingesting · insert ingest_runs
+    A->>J: POST /api/2.1/jobs/run-now {library_id} (one active run per library)
+    J->>L: library_documents → parsing
+    J->>V: read the library's files
+    J->>J: ai_parse_document → PyMuPDF fallback → section chunks (~1000 chars)
+    J->>E: embed chunks (batches of 32)
+    E-->>J: bge-m3 vectors (1024-d)
+    J->>L: per document: replace upload_chunks (embedding + tsv), status ready / failed
+    loop until ready
+      U->>A: GET /api/libraries/:id/status
+      A->>J: GET /api/2.1/jobs/runs/get
+      A->>L: update ingest_runs + library status (ready / failed)
+    end
+  end
+
+  rect rgb(243, 250, 246)
+    Note over U,S: Question time
+    U->>A: POST /api/ask {libraries: [upload library]}
+    A->>E: embed the question (app SP)
+    A->>L: pgvector HNSW cosine (top 30) + SQL BM25 on tsv (top 30), RLS as the user
+    A->>A: reciprocal rank fusion (k = 60) → provided sources
+    A->>S: custom_inputs.libraries[].sources
+    Note over S: RAG agent skips Vector Search, then reranks, generates and scores as usual
+    S-->>A: answer + sources
+  end

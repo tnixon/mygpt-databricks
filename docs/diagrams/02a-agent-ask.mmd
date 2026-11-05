@@ -1,0 +1,46 @@
+sequenceDiagram
+  %% 02a Agent use: one grounded question, browser -> app -> Supervisor -> RAG / Genie / tools
+  autonumber
+  actor U as User (browser)
+  participant A as st-jude-mygpt<br/>Databricks App
+  participant L as projects/mygpt<br/>Lakebase (databricks_postgres.mygpt)
+  participant S as mygpt-supervisor<br/>agent endpoint
+  participant C as mygpt-chat<br/>AI Gateway (router LLM)
+  participant R as mygpt-rag-agent<br/>agent endpoint
+  participant G as Genie space 01f1c8e7…<br/>"MyGPT structured data"
+  participant T as mygpt_tools<br/>UC functions (managed MCP)
+  participant X as RCSB / NCBI<br/>public APIs
+  participant M as /Shared/mygpt/mygpt-rag-agent<br/>MLflow experiment 2750091371639406
+
+  U->>A: POST /api/ask {question, libraries, model} (OBO token)
+  A->>L: resolveLibraries: RLS as the user (mygpt.user / mygpt.groups)
+  opt upload libraries selected
+    A->>A: hybrid search over upload_chunks (see diagram 04)
+  end
+  A->>S: POST /serving-endpoints/mygpt-supervisor/invocations<br/>custom_inputs {libraries[+sources], route, history}
+  loop up to 4 steps (MAX_STEPS)
+    S->>C: chat + tool definitions (tool_choice auto / required)
+    C-->>S: tool call(s)
+    alt search_documents (≤ 4 libraries in parallel)
+      S->>R: POST /serving-endpoints/mygpt-rag-agent/invocations<br/>custom_inputs {corpus, sources?, k, model}
+      R-->>S: answer, sources, qrs / ars / hi_eq / hi_rf, trace_id
+    else query_structured_data
+      S->>G: MCP tools/call query_space → poll_response (≤ 90 s)
+      G-->>S: SQL result over kinome / kinase_papers / corpus_documents (≤ 50 rows)
+    else domain tools (pubmed_summary, search_pdb_by_gene, …)
+      S->>T: POST /api/2.0/mcp/functions/structural_biology/mygpt_tools (tools/call)
+      T->>X: HTTP via rcsb_search / rcsb_data / ncbi_eutils connections
+      X-->>T: JSON
+      T-->>S: tool result
+    end
+  end
+  opt several libraries or multi-turn
+    S->>C: merge turn (renumber citations)
+  end
+  S-->>A: answer + custom_outputs {route, sources, scores, trace_id, tool_calls}
+  A->>L: saveTurn → conversations, questions, answers, sources
+  A-->>U: answer with citations and trust scores
+  S--)M: traces (supervisor + RAG spans, async)
+  U->>A: 👍 / 👎 on an answer
+  A->>L: feedback row
+  A->>M: POST /api/3.0/mlflow/traces/{trace_id}/assessments (user_rating)
