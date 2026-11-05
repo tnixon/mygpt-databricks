@@ -16,6 +16,9 @@ import argparse
 import json
 import os
 
+import lvdash
+from lvdash import cat, chart, col, counter, filter_widget, num, parameter_widget, rule, table, text
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 EXPERIMENT = "/Shared/mygpt/mygpt-rag-agent"  # = databricks.yml var.experiment_path
 OUT = os.path.join(HERE, "mygpt_benchmarks.lvdash.json")
@@ -43,132 +46,7 @@ def dataset(name: str, experiment: str) -> dict:
         base = f.read().rstrip("\n").replace("{experiment}", experiment)
     with open(os.path.join(HERE, "sql", f"{name}.sql")) as f:
         body = f.read().rstrip("\n")
-    ds = {"name": name, "displayName": DATASETS[name], "queryLines": [line + "\n" for line in (base + "\n" + body).split("\n")]}
-    if name in PARAMETERS:
-        ds["parameters"] = [
-            {"displayName": label, "keyword": kw, "dataType": dtype,
-             "defaultSelection": {"values": {"dataType": dtype, "values": [{"value": default}]}}}
-            for kw, label, dtype, default in PARAMETERS[name]]
-    return ds
-
-
-def query(name: str, ds: str, fields: list[tuple[str, str]], disaggregated: bool = True) -> dict:
-    return {"name": name, "query": {"datasetName": ds, "disaggregated": disaggregated,
-                                    "fields": [{"name": n, "expression": e} for n, e in fields]}}
-
-
-def cols(*names: str) -> list[tuple[str, str]]:
-    return [(n, f"`{n}`") for n in names]
-
-
-def text(name: str, md: str, x: int, y: int, w: int, h: int) -> dict:
-    return {"widget": {"name": name, "textbox_spec": md}, "position": {"x": x, "y": y, "width": w, "height": h}}
-
-
-def counter(name: str, ds: str, column: str, title: str, x: int, y: int) -> dict:
-    field = f"sum({column})"
-    return {
-        "widget": {
-            "name": name,
-            "queries": [query("main_query", ds, [(field, f"SUM(`{column}`)")], disaggregated=False)],
-            "spec": {"version": 2, "widgetType": "counter",
-                     "encodings": {"value": {"fieldName": field, "displayName": title}},
-                     "frame": {"title": title, "showTitle": True}},
-        },
-        "position": {"x": x, "y": y, "width": 1, "height": 3},
-    }
-
-
-def chart(name: str, kind: str, ds: str, title: str, x_enc: dict, y_enc: dict, color: dict | None,
-          pos: tuple[int, int, int, int], extra: dict | None = None) -> dict:
-    fields = [x_enc["fieldName"], y_enc["fieldName"]] + ([color["fieldName"]] if color else [])
-    encodings = {"x": x_enc, "y": y_enc}
-    if color:
-        encodings["color"] = color
-    spec = {"version": 3, "widgetType": kind, "encodings": encodings, "frame": {"title": title, "showTitle": True}}
-    spec.update(extra or {})
-    x, y, w, h = pos
-    return {"widget": {"name": name, "queries": [query("main_query", ds, cols(*fields))], "spec": spec},
-            "position": {"x": x, "y": y, "width": w, "height": h}}
-
-
-def cat(field: str, label: str) -> dict:
-    return {"fieldName": field, "scale": {"type": "categorical"}, "displayName": label}
-
-
-def num(field: str, label: str, lo: float | None = 0, hi: float | None = 1) -> dict:
-    scale: dict = {"type": "quantitative"}
-    if lo is not None and hi is not None:
-        scale["domain"] = {"min": lo, "max": hi}
-    return {"fieldName": field, "scale": scale, "displayName": label}
-
-
-def filter_widget(name: str, field: str, title: str, datasets: list[str], pos: tuple[int, int, int, int],
-                  multi: bool = False) -> dict:
-    queries = [query(f"f_{ds}", ds, cols(field), disaggregated=False) for ds in datasets]
-    x, y, w, h = pos
-    return {
-        "widget": {
-            "name": name,
-            "queries": queries,
-            "spec": {"version": 2, "widgetType": "filter-multi-select" if multi else "filter-single-select",
-                     "encodings": {"fields": [{"fieldName": field, "displayName": title, "queryName": q["name"]}
-                                              for q in queries]},
-                     "frame": {"title": title, "showTitle": True}},
-        },
-        "position": {"x": x, "y": y, "width": w, "height": h},
-    }
-
-
-def parameter_widget(name: str, keyword: str, title: str, ds: str, pos: tuple[int, int, int, int]) -> dict:
-    q = {"name": f"parameter_{ds}_{keyword}",
-         "query": {"datasetName": ds, "parameters": [{"name": keyword, "keyword": keyword}], "disaggregated": False}}
-    x, y, w, h = pos
-    return {
-        "widget": {
-            "name": name,
-            "queries": [q],
-            "spec": {"version": 2, "widgetType": "filter-single-select",
-                     "encodings": {"fields": [{"parameterName": keyword, "queryName": q["name"]}]},
-                     "frame": {"title": title, "showTitle": True}},
-        },
-        "position": {"x": x, "y": y, "width": w, "height": h},
-    }
-
-
-def number_fmt(places: int) -> dict:
-    return {"type": "number-plain", "abbreviation": "none", "decimalPlaces": {"type": "exact", "places": places}}
-
-
-def rule(field: str, value: str, color: str) -> dict:
-    return {"condition": {"operator": "=", "fieldName": field, "operand": {"type": "data-value", "value": value}},
-            "backgroundColor": color}
-
-
-def table(name: str, ds: str, title: str, columns: list[dict], pos: tuple[int, int, int, int], freeze: int = 0) -> dict:
-    hidden = [c.pop("_also", []) for c in columns]
-    fields = [c["fieldName"] for c in columns] + [f for extra in hidden for f in extra]
-    spec = {"version": 2, "widgetType": "table", "encodings": {"columns": columns},
-            "frame": {"title": title, "showTitle": True}, "data": {"queryName": "main_query"}}
-    if freeze:
-        spec["freezeUpToColumnNumber"] = freeze
-    x, y, w, h = pos
-    return {"widget": {"name": name, "queries": [query("main_query", ds, cols(*dict.fromkeys(fields)))], "spec": spec},
-            "position": {"x": x, "y": y, "width": w, "height": h}}
-
-
-def col(field: str, label: str, places: int | None = None, rules: list | None = None, template: str | None = None,
-        also: list[str] | None = None) -> dict:
-    c: dict = {"fieldName": field, "displayName": label}
-    if places is not None:
-        c["format"] = number_fmt(places)
-    if template:
-        c["formatTemplate"] = template
-    if rules:
-        c["style"] = {"type": "basic", "rules": rules}
-    if also:
-        c["_also"] = also
-    return c
+    return lvdash.dataset(name, DATASETS[name], base + "\n" + body, PARAMETERS.get(name))
 
 
 STATUS_RULES = [rule("status", "Better", GREEN), rule("status", "On par", AMBER), rule("status", "Worse", RED)]

@@ -222,9 +222,14 @@ function ChatPage() {
     newConversation(); // a conversation belongs to one set of libraries
   };
 
-  // Direct mode: stream straight from the model (no retrieval).
+  // Direct mode: stream straight from the model (no retrieval). These calls run as the signed-in
+  // user (OBO), so usage_context is what lets the cost dashboard attribute them to MyGPT
+  // (system.serving.endpoint_usage; see dashboards/README.md).
   const request = useMemo(
-    () => ({ messages: messages.map((m) => ({ role: m.role, content: m.content })) }),
+    () => ({
+      messages: messages.map((m) => ({ role: m.role, content: m.content })),
+      usage_context: { project: 'mygpt', component: 'app-direct' },
+    }),
     [messages],
   );
   const { stream, chunks, streaming, error, reset } = useServingStream(request, {

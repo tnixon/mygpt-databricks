@@ -74,7 +74,11 @@ MODEL_ALIASES = {
 # Phase 6: query/answer translation goes through its own Unity AI Gateway endpoint
 # (mygpt-translate -> databricks-gemma-3-12b, the base model of MyGPT's translategemma).
 TRANSLATE_ENDPOINT = os.environ.get("MYGPT_TRANSLATE_ENDPOINT", "mygpt-translate")
-RERANK_MODEL = "cross-encoder/qnli-electra-base"  # English (MyGPT default)
+# Tags the chat / translate calls in system.serving.endpoint_usage so the cost dashboard can attribute
+# them to MyGPT without inferring the caller (dashboards/README.md). Chat endpoints only: the
+# custom bge-m3 endpoint's model signature rejects unknown fields, so embedding calls go without.
+USAGE_CONTEXT = {"project": "mygpt", "component": "rag-agent"}
+RERANK_MODEL ="cross-encoder/qnli-electra-base"  # English (MyGPT default)
 RERANK_MODEL_MULTILINGUAL = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"  # MyGPT's non-English default
 RERANK_CUTOFFS = {RERANK_MODEL: 0.10, RERANK_MODEL_MULTILINGUAL: 0.05}
 NLI_MODEL = "cross-encoder/nli-deberta-v3-base"
@@ -560,7 +564,7 @@ class MyGPTRagAgent(ResponsesAgent):
                 resp = self._workspace().api_client.do(
                     "POST", f"/serving-endpoints/{TRANSLATE_ENDPOINT}/invocations",
                     body={"messages": [{"role": "system", "content": system}, {"role": "user", "content": text}],
-                          "temperature": 0},
+                          "temperature": 0, "usage_context": USAGE_CONTEXT},
                 )
                 out = _message_text(resp)
                 if not out:
@@ -639,7 +643,7 @@ class MyGPTRagAgent(ResponsesAgent):
         # retrieval/embeddings — avoids the databricks-sdk[openai] dependency.
         resp = self._workspace().api_client.do(
             "POST", f"/serving-endpoints/{endpoint}/invocations",
-            body={"messages": [{"role": "user", "content": prompt}]},
+            body={"messages": [{"role": "user", "content": prompt}], "usage_context": USAGE_CONTEXT},
         )
         return _message_text(resp)
 

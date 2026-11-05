@@ -12,11 +12,17 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from datetime import timedelta
 
 import mlflow
 import mlflow.sentence_transformers
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.serving import EndpointCoreConfigInput, ServedEntityInput
+from databricks.sdk.service.serving import (
+    AiGatewayUsageTrackingConfig,
+    EndpointCoreConfigInput,
+    ServedEntityInput,
+    ServingModelWorkloadType,
+)
 from sentence_transformers import SentenceTransformer
 
 
@@ -55,7 +61,8 @@ def main() -> None:
         ServedEntityInput(
             entity_name=uc_model,
             entity_version=registered.version,
-            workload_type="GPU_SMALL",
+            # an enum, not a string: newer SDKs serialize it with .value
+            workload_type=ServingModelWorkloadType.GPU_SMALL,
             workload_size="Small",
             # Must stay warm: Vector Search embeds queries through this endpoint at
             # query time, which fails if it is scaled to zero. (Cost: always-on GPU.)
@@ -72,6 +79,16 @@ def main() -> None:
             config=EndpointCoreConfigInput(name=args.endpoint_name, served_entities=served),
         )
         print(f"Created endpoint {args.endpoint_name}")
+
+    # AI Gateway usage tracking: request counts (incl. Vector Search's embedding calls) land in
+    # system.serving.endpoint_usage for the cost dashboard. The gateway config can't change while
+    # the endpoint is updating, so wait for the config update above to settle first. A GPU
+    # rollout can take well over the SDK's default 20 minutes (2026-11-04: 35+ min).
+    w.serving_endpoints.wait_get_serving_endpoint_not_updating(args.endpoint_name, timeout=timedelta(minutes=90))
+    w.serving_endpoints.put_ai_gateway(
+        name=args.endpoint_name, usage_tracking_config=AiGatewayUsageTrackingConfig(enabled=True),
+    )
+    print(f"AI Gateway usage tracking on {args.endpoint_name}")
 
 
 if __name__ == "__main__":

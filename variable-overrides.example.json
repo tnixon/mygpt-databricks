@@ -15,6 +15,7 @@
   "experiment_path": "/Shared/mygpt/mygpt-rag-agent",
   "name_prefix": "[mygpt]",
   "dashboard_display_name": "Benchmarks — MyGPT vs Databricks agent",
+  "cost_dashboard_display_name": "Costs — usage and spend per component",
   "genie_title": "MyGPT structured data",
   "embedding_model": "bge_m3",
   "embedding_endpoint": "mygpt-bge-m3",

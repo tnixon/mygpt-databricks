@@ -87,7 +87,7 @@ That's why the index points at `mygpt-bge-m3` directly, not `mygpt-embeddings`.
 | ✓ | Capability | Used for | Step | Status |
 |---|---|---|---|---|
 | ☐ | MLflow 3 experiments and tracing | `/Shared/mygpt/mygpt-rag-agent`, which holds models, traces and feedback | 2, 10 | GA |
-| ☐ | AI/BI dashboards | Benchmarks dashboard | 2 | GA |
+| ☐ | AI/BI dashboards | Benchmarks and cost dashboards | 2 | GA |
 | ☐ | MLflow GenAI evaluation + UC eval datasets | `mygpt_eval*` jobs | 13 | GA |
 | ☐ | MLflow **production monitoring** (registered scorers) | `mygpt_eval_monitor` | 13 | ⚠️ **Beta** |
 
@@ -152,7 +152,9 @@ Notes:
   therefore only means editing the overrides files (and `CATALOG=` / `SCHEMA=` for the `make`
   upload targets).
 - The dashboard JSON is static. After changing `experiment_path`, run
-  `python3 dashboards/build_dashboard.py --experiment <path>`, then redeploy.
+  `python3 dashboards/build_dashboard.py --experiment <path>`, then redeploy. The cost dashboard
+  reads the variables itself: after renaming any resource, run
+  `python3 dashboards/build_cost_dashboard.py --profile <profile>`, then redeploy (dashboards/README.md).
 - Changing `app_name` creates a **new** app.
 - Not variables: the workspace host (`targets.default.workspace.host` in **both** bundles: set
   it to the new workspace URL), the UC HTTP connection names (`rcsb_search`, `rcsb_data`,
@@ -235,7 +237,7 @@ databricks bundle deploy   -p $P
 | UC volume | `structural_biology.mygpt.reference` (MyGPT-evaluations CSVs, uploaded in step 6) |
 | UC volume | `structural_biology.mygpt.eval_private` (restricted: owner and metastore admins only) |
 | MLflow experiment | `/Shared/mygpt/mygpt-rag-agent` (shared by agent models, eval runs and production traces) |
-| AI/BI dashboard | `[mygpt] Benchmarks — MyGPT vs Databricks agent` |
+| AI/BI dashboards | `[mygpt] Benchmarks — MyGPT vs Databricks agent`, `[mygpt] Costs — usage and spend per component` |
 | Jobs (defined, not run) | `mygpt_etl`, `mygpt_upload_ingest`, `mygpt_deploy_embedding`, `mygpt_deploy_gateway`, `mygpt_deploy_chat_gateway`, `mygpt_deploy_translate_gateway`, `mygpt_deploy_agent`, `mygpt_deploy_tools`, `mygpt_deploy_genie`, `mygpt_deploy_supervisor`, `mygpt_eval_build_datasets`, `mygpt_eval`, `mygpt_eval_reference`, `mygpt_eval_monitor` |
 | Workspace files | The repo (`etl/`, `agents/`, `eval/`, `dashboards/`) synced to the bundle's `${workspace.file_path}`. A checkout with the submodule also syncs `reference/MyGPT-evaluations/**/*.csv`; jobs use those only when the `reference` volume has no copy |
 
